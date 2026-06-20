@@ -72,9 +72,15 @@ func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> vo
 	rd = p_rd
 	addon_dir = p_addon_dir
 	screen = p_screen
+	# NEAREST + clamp-to-edge — matches the reference WebGL2 backend's effect render
+	# targets (webgl2.js:130-131/221-222 set gl.NEAREST). Effects sample at texel centers
+	# or integer-texel offsets (where NEAREST == LINEAR), so this is invisible to them;
+	# but coord-resampling filters (pixels, warps, polar, lens…) that sample BETWEEN texels
+	# need NEAREST to fetch one texel rather than blending two. (3D volumes use LINEAR —
+	# add a separate sampler when 3D lands.)
 	var ss := RDSamplerState.new()
-	ss.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	ss.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	ss.min_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
+	ss.mag_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
 	ss.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
 	ss.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
 	_sampler = rd.sampler_create(ss)
