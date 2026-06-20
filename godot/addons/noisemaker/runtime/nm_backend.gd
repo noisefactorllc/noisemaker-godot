@@ -3,21 +3,23 @@
 # a fullscreen fragment draw into a color attachment; "compute" passes are render
 # passes with MRT. Ported structurally from the Unity NMRenderBackend.cs.
 #
-# Binding convention (all Godot effect shaders follow it):
-#   set 0, binding 0      : Params UBO  `uniform Params { vec4 data[N]; }`  (effect passes)
-#   set 0, binding 1..k   : input sampler2D, in pass.inputs declaration order
-#   blit pass is special  : sampler2D `src` at set 0, binding 0 (no UBO)
+# Two uniform models, both a single packed `vec4 data[N]` UBO at set 0, binding 0:
+#   - Effects WITH a reference uniformLayout (noise/cell/gradient/...): the shader
+#     declares `data[N]` and reads `data[i].comp` verbatim from the WGSL. The backend
+#     packs engine globals + params by that layout.
+#   - Effects WITHOUT one (solid/osc2d/blur/...): the backend SYNTHESIZES a layout
+#     (fixed engine header in slots 0-2, params from slot 3) and INJECTS the UBO decl
+#     plus `#define <name> data[slot].comp` after #version, so the shader uses bare
+#     reference names (ports near-verbatim from the GLSL). Same packer either way.
+# Input textures bind at set 0, binding 1.. in pass.inputs order. blit is special:
+# sampler `src` at binding 0, no UBO.
 #
-# Uniforms: a single packed `vec4 data[N]` UBO per pass. Effects WITH a reference
-# uniformLayout (noise/cell/...) use it verbatim (engine globals + params packed by
-# slot/component, so the WGSL body is unchanged). Effects WITHOUT one (solid) fall
-# back to declaration-order packing from slot 0.
+# Compile-time defines (NOISE_TYPE, LOOP_OFFSET) are injected after #version; shaders
+# are cached per (program, define-set).
 #
-# Compile-time defines (NOISE_TYPE, LOOP_OFFSET) are injected as `#define` after the
-# #version line; shaders are cached per (program, define-set).
-#
-# Coordinates: Godot RenderingDevice is top-left origin / Vulkan Y-down clip, same
-# as WGSL — port from WGSL, NO per-effect Y-flip. texture_get_data is top-down.
+# Coordinates: Godot RenderingDevice is top-left origin / Vulkan Y-down clip, same as
+# WGSL — port from WGSL, NO per-effect Y-flip. A single global flip at present (see
+# save_surface_png) reconciles to the webgl2/GLSL golden.
 extends RefCounted
 
 const FULLSCREEN_VS := """#version 450
@@ -33,11 +35,22 @@ layout(location = 0) out vec4 frag;
 void main() { frag = texture(src, v_uv); }
 """
 
-# Engine-provided globals (reference/04 §10.1) — sourced from the runtime, not the
-# pass uniforms. Used by the layout packer to fill the data[] slots they name.
+# Engine-provided globals (reference/04 §10.1), sourced from the runtime.
 const ENGINE_GLOBALS := {
 	"resolution": true, "time": true, "aspectRatio": true, "tileOffset": true,
 	"fullResolution": true, "renderScale": true, "deltaTime": true, "frame": true,
+}
+
+# Fixed engine header for synthesized (no-layout) effect layouts.
+const ENGINE_SYNTH := {
+	"resolution": {"slot": 0, "components": "xy"},
+	"time": {"slot": 0, "components": "z"},
+	"aspectRatio": {"slot": 0, "components": "w"},
+	"tileOffset": {"slot": 1, "components": "xy"},
+	"fullResolution": {"slot": 1, "components": "zw"},
+	"renderScale": {"slot": 2, "components": "x"},
+	"deltaTime": {"slot": 2, "components": "y"},
+	"frame": {"slot": 2, "components": "z"},
 }
 
 var rd: RenderingDevice
@@ -46,12 +59,12 @@ var screen: Vector2i
 var _sampler: RID
 var _vfmt: int
 var _varr: RID
-var _shaders := {}          # cache key -> RID
-var _pipelines := {}        # cache key:fbformat -> RID
-var _textures := {}         # texId -> RID
-var _effect_defs := {}      # "ns/fn" -> def dict
+var _shaders := {}
+var _pipelines := {}
+var _textures := {}
+var _effect_defs := {}
+var _synth_cache := {}      # "ns/fn" -> synthesized layout
 var render_surface_tex := ""
-# engine globals for the current render (paused parity defaults)
 var _time := 0.25
 var _render_scale := 1.0
 
@@ -76,9 +89,7 @@ func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> vo
 	_vfmt = rd.vertex_format_create([attr])
 	_varr = rd.vertex_array_create(3, _vfmt, [vbuf])
 
-# ---------------------------------------------------------------------------
-# Textures
-# ---------------------------------------------------------------------------
+# --- textures -------------------------------------------------------------
 
 func _data_format(fmt: String) -> int:
 	match fmt:
@@ -101,7 +112,6 @@ func _make_tex(w: int, h: int, fmt: int) -> RID:
 	return rd.texture_create(tf, RDTextureView.new())
 
 func _resolve_dim(d, screen_size: int) -> int:
-	# Phase-2 minimal: number or "screen"/"auto". Full Dim rules land in dim.gd.
 	if typeof(d) == TYPE_FLOAT or typeof(d) == TYPE_INT:
 		return max(1, int(d))
 	if typeof(d) == TYPE_STRING and (d == "screen" or d == "auto"):
@@ -130,9 +140,7 @@ func _ensure_tex(tex_id: String) -> void:
 	if not _textures.has(tex_id):
 		_textures[tex_id] = _make_tex(screen.x, screen.y, _data_format("rgba16f"))
 
-# ---------------------------------------------------------------------------
-# Shader assembly (include resolution + define injection)
-# ---------------------------------------------------------------------------
+# --- shader assembly ------------------------------------------------------
 
 func _resolve_includes(src: String) -> String:
 	var out := ""
@@ -151,18 +159,16 @@ func _resolve_includes(src: String) -> String:
 			out += line + "\n"
 	return out
 
-# Inject `#define K V` right after the #version line (defines must precede use).
-func _inject_defines(src: String, defines: Dictionary) -> String:
-	if defines.is_empty():
+# Insert text right after the #version line (defines/UBO decl must precede use).
+func _inject_after_version(src: String, inject: String) -> String:
+	if inject == "":
 		return src
-	var lines := src.split("\n")
 	var out := ""
 	var injected := false
-	for line in lines:
+	for line in src.split("\n"):
 		out += line + "\n"
 		if not injected and line.strip_edges().begins_with("#version"):
-			for k in defines:
-				out += "#define %s %s\n" % [k, str(defines[k])]
+			out += inject
 			injected = true
 	return out
 
@@ -214,9 +220,7 @@ func _get_pipeline(cache_key: String, shader: RID, fb_format: int) -> RID:
 	_pipelines[key] = p
 	return p
 
-# ---------------------------------------------------------------------------
-# Effect definitions + uniform packing
-# ---------------------------------------------------------------------------
+# --- effect definitions + uniform packing ---------------------------------
 
 func _load_effect_def(ns: String, fn: String) -> Dictionary:
 	var key := ns + "/" + fn
@@ -233,12 +237,62 @@ func _load_effect_def(ns: String, fn: String) -> Dictionary:
 	_effect_defs[key] = def
 	return def
 
-# Engine global value (array of floats) for the current paused render.
+func _type_width(t: String) -> int:
+	match t:
+		"vec2":
+			return 2
+		"vec3", "color":
+			return 3
+		"vec4":
+			return 4
+		_:
+			return 1
+
+# Synthesize a packed layout for a no-layout effect: fixed engine header (slots 0-2)
+# then each `uniform` global from slot 3 in declaration order (multi-component values
+# never straddle a vec4).
+func _synth_layout(ns: String, fn: String, globals: Dictionary) -> Dictionary:
+	var key := ns + "/" + fn
+	if _synth_cache.has(key):
+		return _synth_cache[key]
+	var layout := {}
+	for k in ENGINE_SYNTH:
+		layout[k] = ENGINE_SYNTH[k]
+	var letters := ["x", "y", "z", "w"]
+	var slot := 3
+	var cursor := 0
+	for gk in globals:
+		var g = globals[gk]
+		if not g.has("uniform"):
+			continue
+		var w := _type_width(str(g.get("type", "float")))
+		if cursor + w > 4:
+			slot += 1
+			cursor = 0
+		var comps := ""
+		for i in range(w):
+			comps += letters[cursor + i]
+		layout[str(g["uniform"])] = {"slot": slot, "components": comps}
+		cursor += w
+		if cursor >= 4:
+			slot += 1
+			cursor = 0
+	_synth_cache[key] = layout
+	return layout
+
+# UBO decl + #define block injected for synthesized (no-layout) effects.
+func _synth_header(layout: Dictionary) -> String:
+	var max_slot := 0
+	for k in layout:
+		max_slot = max(max_slot, int(layout[k]["slot"]))
+	var s := "layout(set=0,binding=0,std140) uniform Params { vec4 data[%d]; };\n" % (max_slot + 1)
+	for k in layout:
+		s += "#define %s data[%d].%s\n" % [k, int(layout[k]["slot"]), str(layout[k]["components"])]
+	return s
+
 func _engine_value(name: String) -> Array:
 	match name:
-		"resolution":
-			return [float(screen.x), float(screen.y)]
-		"fullResolution":
+		"resolution", "fullResolution":
 			return [float(screen.x), float(screen.y)]
 		"tileOffset":
 			return [0.0, 0.0]
@@ -248,9 +302,7 @@ func _engine_value(name: String) -> Array:
 			return [float(screen.x) / float(screen.y) if screen.y != 0 else 1.0]
 		"renderScale":
 			return [_render_scale]
-		"deltaTime":
-			return [0.0]
-		"frame":
+		"deltaTime", "frame":
 			return [0.0]
 	return [0.0]
 
@@ -271,14 +323,12 @@ func _value_floats(v) -> Array:
 		return out
 	return [float(v)]
 
-# Pack per the reference uniformLayout: engine globals + pass uniforms (or effect
-# defaults) into a vec4[N] array, by slot/component.
 func pack_with_layout(layout: Dictionary, globals: Dictionary, p: Dictionary) -> PackedByteArray:
 	var max_slot := 0
 	for name in layout:
 		max_slot = max(max_slot, int(layout[name]["slot"]))
 	var data := PackedFloat32Array()
-	data.resize((max_slot + 1) * 4)  # zero-filled
+	data.resize((max_slot + 1) * 4)
 	var pass_u: Dictionary = p.get("uniforms", {})
 	for name in layout:
 		var slot := int(layout[name]["slot"])
@@ -296,26 +346,16 @@ func pack_with_layout(layout: Dictionary, globals: Dictionary, p: Dictionary) ->
 			data[slot * 4 + offs[i]] = vals[i]
 	return data.to_byte_array()
 
-# Fallback for individual-uniform effects with no layout (solid): pack the pass
-# uniforms in declaration order from slot 0.
-func _pack_simple(p: Dictionary) -> PackedByteArray:
-	var comps := PackedFloat32Array()
-	for name in p.get("uniforms", {}):
-		for x in _value_floats(p["uniforms"][name]):
-			comps.append(x)
-	while comps.size() == 0 or comps.size() % 4 != 0:
-		comps.append(0.0)
-	return comps.to_byte_array()
-
 func _pack_pass(p: Dictionary) -> PackedByteArray:
-	var def := _load_effect_def(str(p.get("namespace")), str(p.get("func")))
+	var ns := str(p.get("namespace"))
+	var fn := str(p.get("func"))
+	var def := _load_effect_def(ns, fn)
+	var globals: Dictionary = def.get("globals", {})
 	if def.has("uniformLayout"):
-		return pack_with_layout(def["uniformLayout"], def.get("globals", {}), p)
-	return _pack_simple(p)
+		return pack_with_layout(def["uniformLayout"], globals, p)
+	return pack_with_layout(_synth_layout(ns, fn, globals), globals, p)
 
-# ---------------------------------------------------------------------------
-# Execution
-# ---------------------------------------------------------------------------
+# --- execution ------------------------------------------------------------
 
 func execute_pass(p: Dictionary) -> void:
 	var ptype := str(p.get("passType", "effect"))
@@ -328,8 +368,16 @@ func execute_pass(p: Dictionary) -> void:
 		var ns := str(p.get("namespace"))
 		var fn := str(p.get("func"))
 		var defs: Dictionary = p.get("defines", {})
+		var def := _load_effect_def(ns, fn)
+		var inject := ""
+		for k in defs:
+			# Defines are compile-time integer enums; emit as ints (Godot JSON parses
+			# them as floats, which would otherwise inject `10.0`).
+			inject += "#define %s %d\n" % [k, int(defs[k])]
+		if not def.has("uniformLayout"):
+			inject += _synth_header(_synth_layout(ns, fn, def.get("globals", {})))
 		cache_key = ns + "/" + fn + _defines_key(defs)
-		frag_src = _inject_defines(_load_fragment(ns, fn), defs)
+		frag_src = _inject_after_version(_load_fragment(ns, fn), inject)
 	var shader := _get_shader(cache_key, frag_src)
 	if not shader.is_valid():
 		return
@@ -399,15 +447,12 @@ func save_surface_png(path: String) -> bool:
 		return false
 	var bytes := rd.texture_get_data(_textures[render_surface_tex], 0)
 	var src := Image.create_from_data(screen.x, screen.y, false, Image.FORMAT_RGBAH, bytes)
-	# Single global Y reconciliation (the present point, analogous to the Unity NMBlit
-	# flip). The reference golden is webgl2/GLSL (bottom-left origin) flipped to a
-	# top-down PNG; our pipeline is uniformly top-left (Vulkan), so the composited
-	# result is one vertical flip away. RenderingDevice keeps orientation consistent
-	# across passes, so this depth-independent flip reconciles every effect.
+	# Single global Y reconciliation (present point, like the Unity NMBlit flip): the
+	# webgl2/GLSL golden is bottom-left flipped to a top-down PNG; our pipeline is
+	# uniformly top-left, so the result is one vertical flip away.
 	src.flip_y()
-	# Godot's save_png on a half-float image clobbers alpha to opaque. Quantize the
-	# linear float surface to 8-bit ourselves (round, clamp, NO sRGB), preserving the
-	# alpha channel — this also matches the reference's exact round(v*255) (parity).
+	# save_png on a half-float image clobbers alpha to opaque; quantize to 8-bit
+	# ourselves (round, clamp, NO sRGB), preserving alpha and matching reference round(v*255).
 	var out := Image.create(screen.x, screen.y, false, Image.FORMAT_RGBA8)
 	for y in screen.y:
 		for x in screen.x:
