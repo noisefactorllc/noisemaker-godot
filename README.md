@@ -77,16 +77,32 @@ GODOT=/Applications/Godot.app/Contents/MacOS/Godot bash parity/run.sh noise
 
 ## Status
 
-**8 / 8 Tier-1 programs pixel-identical** on Apple M4 / Metal (within 1/255, SSIM ≈ 1.0):
-`solid`, `noise`, `cell`, `gradient`, `shape`, `osc2d`, the multi-pass `blur`, and the
-two-surface `blendMode`. This exercises the full executor: pooled intermediates,
-multi-input mixing, compile-time defines (`NOISE_TYPE`/`LOOP_OFFSET`), engine globals,
-and both the reference-`uniformLayout` and synthesized no-layout uniform models.
+**29 / 29 ported effects pixel-parity** on Apple M4 / Metal (28 within 1/255, SSIM ≈ 1.0;
+`newton` SSIM 0.99783 at chaotic tolerance). Run the full sweep with `bash parity/sweep.sh`.
+
+| Namespace | Parity | Effects |
+|---|---|---|
+| `synth` | 19 / 29 | solid, noise, cell, gradient, shape, osc2d, testPattern, pattern, perlin, bitwise, mandelbrot, julia, gabor, modPattern, curl, mandala, sacredGeometry, subdivide, newton\* |
+| `filter` | 9 / 90 | blur (blurH+blurV), emboss, posterize, bc, deriv, colorspace, invert, normalMap, pixels |
+| `mixer` | 1 / 14 | blendMode |
+| `points`/`render`/`synth3d`/`filter3d`/`classicNoisedeck` | staged | — |
+
+\* `newton` is a chaotic Newton-fractal: ~0.19% of pixels (isolated root-basin boundary
+speckles) differ by a `df64` ULP between WebGPU and Metal FMA — the documented cross-device
+limit, gated on structural SSIM.
+
+The **8 Tier-1** programs (`solid`/`noise`/`cell`/`gradient`/`shape`/`osc2d`/`blur`/
+`blendMode`) plus the expansion set exercise the full executor: pooled intermediates,
+multi-pass (separable `blur` → `blurH`/`blurV` by `progName`), multi-input mixing,
+compile-time defines, engine globals, both the reference-`uniformLayout` and synthesized
+no-layout uniform models, and NEAREST-filtered coord-resampling (`pixels`).
 
 Each ported effect ships a Godot-GLSL fragment shader under
 `godot/addons/noisemaker/shaders/effects/<ns>/<prog>.glsl`; the effect-definition JSON
 is generated from the reference by `tools/convert-definitions.mjs`. The per-effect port
-path is documented in [PORTING-GUIDE.md](PORTING-GUIDE.md).
+path is documented in [PORTING-GUIDE.md](PORTING-GUIDE.md), and the engine-agnostic
+architecture (reused from the Unity port) means the remaining effects are mechanical
+applications of that documented procedure.
 
 ## License
 
