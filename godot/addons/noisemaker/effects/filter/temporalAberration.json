@@ -174,5 +174,21 @@
       "format": "rgba8unorm"
     }
   },
+  "uniformLayouts": {
+    "temporalAberration": {
+      "redDelay": {
+        "slot": 0,
+        "components": "x"
+      },
+      "greenDelay": {
+        "slot": 0,
+        "components": "y"
+      },
+      "blueDelay": {
+        "slot": 0,
+        "components": "z"
+      }
+    }
+  },
   "defaultProgram": "search filter, synth\n\nnoise(\n  speed: 40,\n  colorMode: mono,\n  ridges: true\n)\n  .temporalAberration()\n  .write(o0)"
 }

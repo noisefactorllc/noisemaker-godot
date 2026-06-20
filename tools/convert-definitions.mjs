@@ -156,6 +156,15 @@ function convertEffect (instance, namespace, name) {
   def.passes = (instance.passes || []).map(projectPass)
   def.textures = projectTextures(instance.textures, false) || {}
 
+  // Uniform packing layout (slot/components into the vec4[] UBO). The Godot port
+  // binds a single packed `vec4 data[N]` UBO per pass and unpacks by slot/component
+  // exactly as the WGSL does, so the reference layout is carried through verbatim.
+  // (HLSL ignored this — it bound individual named uniforms — but Vulkan/Godot has
+  // no loose uniforms, so the layout is load-bearing here.) `uniformLayouts` (plural,
+  // per-program) is carried when present for multi-program effects.
+  if (instance.uniformLayout) def.uniformLayout = instance.uniformLayout
+  if (instance.uniformLayouts) def.uniformLayouts = instance.uniformLayouts
+
   // 3D volume textures, when present, carry is3D.
   if (instance.textures3d) {
     const t3d = projectTextures(instance.textures3d, true)

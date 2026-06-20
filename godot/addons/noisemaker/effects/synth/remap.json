@@ -853,5 +853,383 @@
     }
   ],
   "textures": {},
+  "uniformLayout": {
+    "bgColor": {
+      "slot": 0,
+      "components": "xyz"
+    },
+    "bgAlpha": {
+      "slot": 0,
+      "components": "w"
+    },
+    "zoneCount": {
+      "slot": 1,
+      "components": "x"
+    },
+    "smoothEdge": {
+      "slot": 1,
+      "components": "y"
+    },
+    "time": {
+      "slot": 1,
+      "components": "w"
+    },
+    "resolution": {
+      "slot": 74,
+      "components": "xy"
+    },
+    "zone0_count": {
+      "slot": 2,
+      "components": "x"
+    },
+    "zone0_active": {
+      "slot": 2,
+      "components": "y"
+    },
+    "zone0_alpha": {
+      "slot": 2,
+      "components": "w"
+    },
+    "zone0_v0": {
+      "slot": 10,
+      "components": "xyzw"
+    },
+    "zone0_v1": {
+      "slot": 11,
+      "components": "xyzw"
+    },
+    "zone0_v2": {
+      "slot": 12,
+      "components": "xyzw"
+    },
+    "zone0_v3": {
+      "slot": 13,
+      "components": "xyzw"
+    },
+    "zone0_v4": {
+      "slot": 14,
+      "components": "xyzw"
+    },
+    "zone0_v5": {
+      "slot": 15,
+      "components": "xyzw"
+    },
+    "zone0_v6": {
+      "slot": 16,
+      "components": "xyzw"
+    },
+    "zone0_v7": {
+      "slot": 17,
+      "components": "xyzw"
+    },
+    "zone1_count": {
+      "slot": 3,
+      "components": "x"
+    },
+    "zone1_active": {
+      "slot": 3,
+      "components": "y"
+    },
+    "zone1_alpha": {
+      "slot": 3,
+      "components": "w"
+    },
+    "zone1_v0": {
+      "slot": 18,
+      "components": "xyzw"
+    },
+    "zone1_v1": {
+      "slot": 19,
+      "components": "xyzw"
+    },
+    "zone1_v2": {
+      "slot": 20,
+      "components": "xyzw"
+    },
+    "zone1_v3": {
+      "slot": 21,
+      "components": "xyzw"
+    },
+    "zone1_v4": {
+      "slot": 22,
+      "components": "xyzw"
+    },
+    "zone1_v5": {
+      "slot": 23,
+      "components": "xyzw"
+    },
+    "zone1_v6": {
+      "slot": 24,
+      "components": "xyzw"
+    },
+    "zone1_v7": {
+      "slot": 25,
+      "components": "xyzw"
+    },
+    "zone2_count": {
+      "slot": 4,
+      "components": "x"
+    },
+    "zone2_active": {
+      "slot": 4,
+      "components": "y"
+    },
+    "zone2_alpha": {
+      "slot": 4,
+      "components": "w"
+    },
+    "zone2_v0": {
+      "slot": 26,
+      "components": "xyzw"
+    },
+    "zone2_v1": {
+      "slot": 27,
+      "components": "xyzw"
+    },
+    "zone2_v2": {
+      "slot": 28,
+      "components": "xyzw"
+    },
+    "zone2_v3": {
+      "slot": 29,
+      "components": "xyzw"
+    },
+    "zone2_v4": {
+      "slot": 30,
+      "components": "xyzw"
+    },
+    "zone2_v5": {
+      "slot": 31,
+      "components": "xyzw"
+    },
+    "zone2_v6": {
+      "slot": 32,
+      "components": "xyzw"
+    },
+    "zone2_v7": {
+      "slot": 33,
+      "components": "xyzw"
+    },
+    "zone3_count": {
+      "slot": 5,
+      "components": "x"
+    },
+    "zone3_active": {
+      "slot": 5,
+      "components": "y"
+    },
+    "zone3_alpha": {
+      "slot": 5,
+      "components": "w"
+    },
+    "zone3_v0": {
+      "slot": 34,
+      "components": "xyzw"
+    },
+    "zone3_v1": {
+      "slot": 35,
+      "components": "xyzw"
+    },
+    "zone3_v2": {
+      "slot": 36,
+      "components": "xyzw"
+    },
+    "zone3_v3": {
+      "slot": 37,
+      "components": "xyzw"
+    },
+    "zone3_v4": {
+      "slot": 38,
+      "components": "xyzw"
+    },
+    "zone3_v5": {
+      "slot": 39,
+      "components": "xyzw"
+    },
+    "zone3_v6": {
+      "slot": 40,
+      "components": "xyzw"
+    },
+    "zone3_v7": {
+      "slot": 41,
+      "components": "xyzw"
+    },
+    "zone4_count": {
+      "slot": 6,
+      "components": "x"
+    },
+    "zone4_active": {
+      "slot": 6,
+      "components": "y"
+    },
+    "zone4_alpha": {
+      "slot": 6,
+      "components": "w"
+    },
+    "zone4_v0": {
+      "slot": 42,
+      "components": "xyzw"
+    },
+    "zone4_v1": {
+      "slot": 43,
+      "components": "xyzw"
+    },
+    "zone4_v2": {
+      "slot": 44,
+      "components": "xyzw"
+    },
+    "zone4_v3": {
+      "slot": 45,
+      "components": "xyzw"
+    },
+    "zone4_v4": {
+      "slot": 46,
+      "components": "xyzw"
+    },
+    "zone4_v5": {
+      "slot": 47,
+      "components": "xyzw"
+    },
+    "zone4_v6": {
+      "slot": 48,
+      "components": "xyzw"
+    },
+    "zone4_v7": {
+      "slot": 49,
+      "components": "xyzw"
+    },
+    "zone5_count": {
+      "slot": 7,
+      "components": "x"
+    },
+    "zone5_active": {
+      "slot": 7,
+      "components": "y"
+    },
+    "zone5_alpha": {
+      "slot": 7,
+      "components": "w"
+    },
+    "zone5_v0": {
+      "slot": 50,
+      "components": "xyzw"
+    },
+    "zone5_v1": {
+      "slot": 51,
+      "components": "xyzw"
+    },
+    "zone5_v2": {
+      "slot": 52,
+      "components": "xyzw"
+    },
+    "zone5_v3": {
+      "slot": 53,
+      "components": "xyzw"
+    },
+    "zone5_v4": {
+      "slot": 54,
+      "components": "xyzw"
+    },
+    "zone5_v5": {
+      "slot": 55,
+      "components": "xyzw"
+    },
+    "zone5_v6": {
+      "slot": 56,
+      "components": "xyzw"
+    },
+    "zone5_v7": {
+      "slot": 57,
+      "components": "xyzw"
+    },
+    "zone6_count": {
+      "slot": 8,
+      "components": "x"
+    },
+    "zone6_active": {
+      "slot": 8,
+      "components": "y"
+    },
+    "zone6_alpha": {
+      "slot": 8,
+      "components": "w"
+    },
+    "zone6_v0": {
+      "slot": 58,
+      "components": "xyzw"
+    },
+    "zone6_v1": {
+      "slot": 59,
+      "components": "xyzw"
+    },
+    "zone6_v2": {
+      "slot": 60,
+      "components": "xyzw"
+    },
+    "zone6_v3": {
+      "slot": 61,
+      "components": "xyzw"
+    },
+    "zone6_v4": {
+      "slot": 62,
+      "components": "xyzw"
+    },
+    "zone6_v5": {
+      "slot": 63,
+      "components": "xyzw"
+    },
+    "zone6_v6": {
+      "slot": 64,
+      "components": "xyzw"
+    },
+    "zone6_v7": {
+      "slot": 65,
+      "components": "xyzw"
+    },
+    "zone7_count": {
+      "slot": 9,
+      "components": "x"
+    },
+    "zone7_active": {
+      "slot": 9,
+      "components": "y"
+    },
+    "zone7_alpha": {
+      "slot": 9,
+      "components": "w"
+    },
+    "zone7_v0": {
+      "slot": 66,
+      "components": "xyzw"
+    },
+    "zone7_v1": {
+      "slot": 67,
+      "components": "xyzw"
+    },
+    "zone7_v2": {
+      "slot": 68,
+      "components": "xyzw"
+    },
+    "zone7_v3": {
+      "slot": 69,
+      "components": "xyzw"
+    },
+    "zone7_v4": {
+      "slot": 70,
+      "components": "xyzw"
+    },
+    "zone7_v5": {
+      "slot": 71,
+      "components": "xyzw"
+    },
+    "zone7_v6": {
+      "slot": 72,
+      "components": "xyzw"
+    },
+    "zone7_v7": {
+      "slot": 73,
+      "components": "xyzw"
+    }
+  },
   "defaultProgram": "search synth\n\nremap(bgColor: #336699, bgAlpha: 1)\n  .write(o0)"
 }

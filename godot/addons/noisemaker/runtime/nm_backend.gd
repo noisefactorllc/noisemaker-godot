@@ -8,6 +8,14 @@
 #   set 0, binding 1..k   : input sampler2D, in pass.inputs declaration order
 #   blit pass is special  : sampler2D `src` at set 0, binding 0 (no UBO)
 #
+# Uniforms: a single packed `vec4 data[N]` UBO per pass. Effects WITH a reference
+# uniformLayout (noise/cell/...) use it verbatim (engine globals + params packed by
+# slot/component, so the WGSL body is unchanged). Effects WITHOUT one (solid) fall
+# back to declaration-order packing from slot 0.
+#
+# Compile-time defines (NOISE_TYPE, LOOP_OFFSET) are injected as `#define` after the
+# #version line; shaders are cached per (program, define-set).
+#
 # Coordinates: Godot RenderingDevice is top-left origin / Vulkan Y-down clip, same
 # as WGSL — port from WGSL, NO per-effect Y-flip. texture_get_data is top-down.
 extends RefCounted
@@ -25,17 +33,27 @@ layout(location = 0) out vec4 frag;
 void main() { frag = texture(src, v_uv); }
 """
 
+# Engine-provided globals (reference/04 §10.1) — sourced from the runtime, not the
+# pass uniforms. Used by the layout packer to fill the data[] slots they name.
+const ENGINE_GLOBALS := {
+	"resolution": true, "time": true, "aspectRatio": true, "tileOffset": true,
+	"fullResolution": true, "renderScale": true, "deltaTime": true, "frame": true,
+}
+
 var rd: RenderingDevice
 var addon_dir: String
 var screen: Vector2i
 var _sampler: RID
 var _vfmt: int
 var _varr: RID
-var _shaders := {}          # program_key -> RID
-var _pipelines := {}        # program_key:fbformat -> RID
+var _shaders := {}          # cache key -> RID
+var _pipelines := {}        # cache key:fbformat -> RID
 var _textures := {}         # texId -> RID
+var _effect_defs := {}      # "ns/fn" -> def dict
 var render_surface_tex := ""
-var _transient: Array[RID] = []   # per-frame RIDs to free after submit
+# engine globals for the current render (paused parity defaults)
+var _time := 0.25
+var _render_scale := 1.0
 
 func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> void:
 	rd = p_rd
@@ -58,6 +76,10 @@ func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> vo
 	_vfmt = rd.vertex_format_create([attr])
 	_varr = rd.vertex_array_create(3, _vfmt, [vbuf])
 
+# ---------------------------------------------------------------------------
+# Textures
+# ---------------------------------------------------------------------------
+
 func _data_format(fmt: String) -> int:
 	match fmt:
 		"rgba32f", "rgba32float":
@@ -79,7 +101,7 @@ func _make_tex(w: int, h: int, fmt: int) -> RID:
 	return rd.texture_create(tf, RDTextureView.new())
 
 func _resolve_dim(d, screen_size: int) -> int:
-	# Phase-0 minimal: number or "screen"/"auto". Full Dim rules land in Phase 3 (dim.gd).
+	# Phase-2 minimal: number or "screen"/"auto". Full Dim rules land in dim.gd.
 	if typeof(d) == TYPE_FLOAT or typeof(d) == TYPE_INT:
 		return max(1, int(d))
 	if typeof(d) == TYPE_STRING and (d == "screen" or d == "auto"):
@@ -96,7 +118,6 @@ func allocate_textures(graph: Dictionary) -> void:
 	var rs = graph.get("renderSurface", null)
 	if rs != null:
 		render_surface_tex = "global_" + str(rs)
-	# Allocate any pass output/input texIds not already present (e.g. global_o0).
 	for p in graph.get("passes", []):
 		for k in p.get("outputs", {}):
 			_ensure_tex(str(p["outputs"][k]))
@@ -108,6 +129,10 @@ func allocate_textures(graph: Dictionary) -> void:
 func _ensure_tex(tex_id: String) -> void:
 	if not _textures.has(tex_id):
 		_textures[tex_id] = _make_tex(screen.x, screen.y, _data_format("rgba16f"))
+
+# ---------------------------------------------------------------------------
+# Shader assembly (include resolution + define injection)
+# ---------------------------------------------------------------------------
 
 func _resolve_includes(src: String) -> String:
 	var out := ""
@@ -126,6 +151,31 @@ func _resolve_includes(src: String) -> String:
 			out += line + "\n"
 	return out
 
+# Inject `#define K V` right after the #version line (defines must precede use).
+func _inject_defines(src: String, defines: Dictionary) -> String:
+	if defines.is_empty():
+		return src
+	var lines := src.split("\n")
+	var out := ""
+	var injected := false
+	for line in lines:
+		out += line + "\n"
+		if not injected and line.strip_edges().begins_with("#version"):
+			for k in defines:
+				out += "#define %s %s\n" % [k, str(defines[k])]
+			injected = true
+	return out
+
+func _defines_key(defines: Dictionary) -> String:
+	if defines.is_empty():
+		return ""
+	var keys := defines.keys()
+	keys.sort()
+	var s := ""
+	for k in keys:
+		s += "__%s_%s" % [k, str(defines[k])]
+	return s
+
 func _load_fragment(ns: String, fn: String) -> String:
 	var path := addon_dir + "/shaders/effects/%s/%s.glsl" % [ns, fn]
 	var f := FileAccess.open(path, FileAccess.READ)
@@ -136,9 +186,9 @@ func _load_fragment(ns: String, fn: String) -> String:
 	f.close()
 	return _resolve_includes(s)
 
-func _get_shader(program_key: String, frag_src: String) -> RID:
-	if _shaders.has(program_key):
-		return _shaders[program_key]
+func _get_shader(cache_key: String, frag_src: String) -> RID:
+	if _shaders.has(cache_key):
+		return _shaders[cache_key]
 	var src := RDShaderSource.new()
 	src.source_vertex = FULLSCREEN_VS
 	src.source_fragment = frag_src
@@ -146,14 +196,14 @@ func _get_shader(program_key: String, frag_src: String) -> RID:
 	for stage in [RenderingDevice.SHADER_STAGE_VERTEX, RenderingDevice.SHADER_STAGE_FRAGMENT]:
 		var e := spirv.get_stage_compile_error(stage)
 		if e != "":
-			push_error("[shader %s] %s" % [program_key, e])
+			push_error("[shader %s] %s" % [cache_key, e])
 			return RID()
 	var sh := rd.shader_create_from_spirv(spirv)
-	_shaders[program_key] = sh
+	_shaders[cache_key] = sh
 	return sh
 
-func _get_pipeline(program_key: String, shader: RID, fb_format: int) -> RID:
-	var key := program_key + ":" + str(fb_format)
+func _get_pipeline(cache_key: String, shader: RID, fb_format: int) -> RID:
+	var key := cache_key + ":" + str(fb_format)
 	if _pipelines.has(key):
 		return _pipelines[key]
 	var blend := RDPipelineColorBlendState.new()
@@ -164,38 +214,123 @@ func _get_pipeline(program_key: String, shader: RID, fb_format: int) -> RID:
 	_pipelines[key] = p
 	return p
 
-# Phase-0 packer: pack pass.uniforms in declaration order from slot 0 (arrays take
-# their length, bools -> 1/0). Sufficient for individual-uniform effects with no
-# engine globals (solid). Layout-aware packing + engine globals arrive in Phase 3.
-func _pack_uniforms(p: Dictionary) -> PackedByteArray:
-	var uniforms: Dictionary = p.get("uniforms", {})
-	var comps := PackedFloat32Array()
-	for name in uniforms:
-		var v = uniforms[name]
-		if typeof(v) == TYPE_ARRAY:
-			for x in v:
-				comps.append(float(x))
-		elif typeof(v) == TYPE_BOOL:
-			comps.append(1.0 if v else 0.0)
+# ---------------------------------------------------------------------------
+# Effect definitions + uniform packing
+# ---------------------------------------------------------------------------
+
+func _load_effect_def(ns: String, fn: String) -> Dictionary:
+	var key := ns + "/" + fn
+	if _effect_defs.has(key):
+		return _effect_defs[key]
+	var path := addon_dir + "/effects/%s/%s.json" % [ns, fn]
+	var def := {}
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f:
+		var parsed = JSON.parse_string(f.get_as_text())
+		f.close()
+		if typeof(parsed) == TYPE_DICTIONARY:
+			def = parsed
+	_effect_defs[key] = def
+	return def
+
+# Engine global value (array of floats) for the current paused render.
+func _engine_value(name: String) -> Array:
+	match name:
+		"resolution":
+			return [float(screen.x), float(screen.y)]
+		"fullResolution":
+			return [float(screen.x), float(screen.y)]
+		"tileOffset":
+			return [0.0, 0.0]
+		"time":
+			return [_time]
+		"aspectRatio":
+			return [float(screen.x) / float(screen.y) if screen.y != 0 else 1.0]
+		"renderScale":
+			return [_render_scale]
+		"deltaTime":
+			return [0.0]
+		"frame":
+			return [0.0]
+	return [0.0]
+
+func _comp_offsets(components: String) -> Array:
+	var m := {"x": 0, "y": 1, "z": 2, "w": 3}
+	var out := []
+	for c in components:
+		out.append(m[c])
+	return out
+
+func _value_floats(v) -> Array:
+	if typeof(v) == TYPE_BOOL:
+		return [1.0 if v else 0.0]
+	if typeof(v) == TYPE_ARRAY:
+		var out := []
+		for x in v:
+			out.append(float(x))
+		return out
+	return [float(v)]
+
+# Pack per the reference uniformLayout: engine globals + pass uniforms (or effect
+# defaults) into a vec4[N] array, by slot/component.
+func pack_with_layout(layout: Dictionary, globals: Dictionary, p: Dictionary) -> PackedByteArray:
+	var max_slot := 0
+	for name in layout:
+		max_slot = max(max_slot, int(layout[name]["slot"]))
+	var data := PackedFloat32Array()
+	data.resize((max_slot + 1) * 4)  # zero-filled
+	var pass_u: Dictionary = p.get("uniforms", {})
+	for name in layout:
+		var slot := int(layout[name]["slot"])
+		var offs := _comp_offsets(str(layout[name]["components"]))
+		var vals: Array
+		if ENGINE_GLOBALS.has(name):
+			vals = _engine_value(name)
+		elif pass_u.has(name):
+			vals = _value_floats(pass_u[name])
+		elif globals.has(name) and globals[name].has("default"):
+			vals = _value_floats(globals[name]["default"])
 		else:
-			comps.append(float(v))
+			vals = [0.0]
+		for i in range(min(offs.size(), vals.size())):
+			data[slot * 4 + offs[i]] = vals[i]
+	return data.to_byte_array()
+
+# Fallback for individual-uniform effects with no layout (solid): pack the pass
+# uniforms in declaration order from slot 0.
+func _pack_simple(p: Dictionary) -> PackedByteArray:
+	var comps := PackedFloat32Array()
+	for name in p.get("uniforms", {}):
+		for x in _value_floats(p["uniforms"][name]):
+			comps.append(x)
 	while comps.size() == 0 or comps.size() % 4 != 0:
 		comps.append(0.0)
 	return comps.to_byte_array()
 
+func _pack_pass(p: Dictionary) -> PackedByteArray:
+	var def := _load_effect_def(str(p.get("namespace")), str(p.get("func")))
+	if def.has("uniformLayout"):
+		return pack_with_layout(def["uniformLayout"], def.get("globals", {}), p)
+	return _pack_simple(p)
+
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
+
 func execute_pass(p: Dictionary) -> void:
 	var ptype := str(p.get("passType", "effect"))
-	var program_key := ""
+	var cache_key := ""
 	var frag_src := ""
 	if ptype == "blit":
-		program_key = "blit"
+		cache_key = "blit"
 		frag_src = BLIT_FS
 	else:
 		var ns := str(p.get("namespace"))
 		var fn := str(p.get("func"))
-		program_key = ns + "/" + fn
-		frag_src = _load_fragment(ns, fn)
-	var shader := _get_shader(program_key, frag_src)
+		var defs: Dictionary = p.get("defines", {})
+		cache_key = ns + "/" + fn + _defines_key(defs)
+		frag_src = _inject_defines(_load_fragment(ns, fn), defs)
+	var shader := _get_shader(cache_key, frag_src)
 	if not shader.is_valid():
 		return
 
@@ -208,15 +343,12 @@ func execute_pass(p: Dictionary) -> void:
 		push_error("pass output texture missing: " + out_tex_id)
 		return
 	var fb := rd.framebuffer_create([_textures[out_tex_id]])
-	_transient.append(fb)
 	var fb_format := rd.framebuffer_get_format(fb)
-	var pipeline := _get_pipeline(program_key, shader, fb_format)
+	var pipeline := _get_pipeline(cache_key, shader, fb_format)
 
 	var set0_uniforms := []
 	if ptype == "blit":
-		# sampler 'src' at binding 0
-		var inputs: Dictionary = p.get("inputs", {})
-		var src_id := str(inputs.get("src", "none"))
+		var src_id := str(p.get("inputs", {}).get("src", "none"))
 		var su := RDUniform.new()
 		su.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 		su.binding = 0
@@ -224,16 +356,13 @@ func execute_pass(p: Dictionary) -> void:
 		su.add_id(_textures[src_id])
 		set0_uniforms.append(su)
 	else:
-		# UBO at binding 0
-		var ubytes := _pack_uniforms(p)
+		var ubytes := _pack_pass(p)
 		var ubo := rd.uniform_buffer_create(ubytes.size(), ubytes)
-		_transient.append(ubo)
 		var u0 := RDUniform.new()
 		u0.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
 		u0.binding = 0
 		u0.add_id(ubo)
 		set0_uniforms.append(u0)
-		# input samplers at binding 1..
 		var bi := 1
 		for sampler_name in p.get("inputs", {}):
 			var tid := str(p["inputs"][sampler_name])
@@ -256,7 +385,8 @@ func execute_pass(p: Dictionary) -> void:
 	rd.draw_list_draw(dl, false, 1)
 	rd.draw_list_end()
 
-func render(graph: Dictionary) -> void:
+func render(graph: Dictionary, normalized_time: float = 0.25) -> void:
+	_time = normalized_time
 	allocate_textures(graph)
 	for p in graph.get("passes", []):
 		execute_pass(p)
@@ -269,6 +399,12 @@ func save_surface_png(path: String) -> bool:
 		return false
 	var bytes := rd.texture_get_data(_textures[render_surface_tex], 0)
 	var src := Image.create_from_data(screen.x, screen.y, false, Image.FORMAT_RGBAH, bytes)
+	# Single global Y reconciliation (the present point, analogous to the Unity NMBlit
+	# flip). The reference golden is webgl2/GLSL (bottom-left origin) flipped to a
+	# top-down PNG; our pipeline is uniformly top-left (Vulkan), so the composited
+	# result is one vertical flip away. RenderingDevice keeps orientation consistent
+	# across passes, so this depth-independent flip reconciles every effect.
+	src.flip_y()
 	# Godot's save_png on a half-float image clobbers alpha to opaque. Quantize the
 	# linear float surface to 8-bit ourselves (round, clamp, NO sRGB), preserving the
 	# alpha channel — this also matches the reference's exact round(v*255) (parity).
