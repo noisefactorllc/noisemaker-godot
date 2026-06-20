@@ -199,15 +199,63 @@ async function main () {
     })
     // Resize the render surface to the requested square (canvas backing + CSS + the
     // pipeline's own surfaces) so the readback is deterministic and matches Unity.
+    //
+    // The demo recomputes a (small, letterboxed) square canvas size from the
+    // container layout inside a `resize`-event handler (demo/shaders/index.html
+    // computeCanvasSize/handleResize). page.setViewportSize() dispatches that
+    // `resize` event asynchronously, so its handler can fire AFTER this block and
+    // revert canvas.width/height (and thus the pipeline surfaces) back to ~90px —
+    // a race that intermittently produced 90x90 goldens. To make the resize
+    // deterministic we PIN the canvas width/height setters to our target before
+    // resizing, so any late layout-driven write is a no-op, then we poll until the
+    // o0 surface texture is stably at the requested size before rendering.
     await page.evaluate((size) => {
       const r = window.__noisemakerCanvasRenderer
       const p = window.__noisemakerRenderingPipeline
-      if (r && r.canvas) {
-        r.canvas.width = size; r.canvas.height = size
-        if (r.canvas.style) { r.canvas.style.width = size + 'px'; r.canvas.style.height = size + 'px' }
+      const canvas = r && r.canvas
+      if (canvas) {
+        // Pin width/height: the real backing store is set to `size`; any later
+        // assignment (e.g. the demo's handleResize) is swallowed. configurable so
+        // this is reversible and overrides the renderer's own interceptor.
+        const pin = (prop) => {
+          Object.defineProperty(canvas, prop, {
+            configurable: true,
+            enumerable: true,
+            get () { return size },
+            set () { /* locked to `size` for deterministic capture */ }
+          })
+        }
+        // Set the true backing store first via the prototype setter, then lock.
+        const proto = Object.getPrototypeOf(canvas)
+        const wd = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'width')
+        const hd = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'height')
+        if (wd && wd.set) wd.set.call(canvas, size)
+        if (hd && hd.set) hd.set.call(canvas, size)
+        void proto
+        pin('width'); pin('height')
+        if (canvas.style) { canvas.style.width = size + 'px'; canvas.style.height = size + 'px' }
       }
       if (p && typeof p.resize === 'function') p.resize(size, size)
     }, opts.size)
+
+    // Poll until the presented o0 surface texture is stably at the requested size.
+    // This drains any pending layout `resize` event and re-asserts the pipeline
+    // size, guaranteeing the readback below sees a `size`x`size` surface.
+    // NOTE: Playwright's signature is waitForFunction(fn, arg, options) — the
+    // single page-function ARG comes BEFORE the options object.
+    await page.waitForFunction((size) => {
+      const p = window.__noisemakerRenderingPipeline
+      if (!p || typeof p.resize !== 'function') return false
+      const surf = p.surfaces && p.surfaces.get(p.graph?.renderSurface || 'o0')
+      const info = surf && p.backend?.textures?.get(surf.read)
+      if (!info) return false
+      if (info.width !== size || info.height !== size) {
+        // Re-assert (cheap no-op when already correct) and keep waiting.
+        p.resize(size, size)
+        return false
+      }
+      return true
+    }, opts.size, { timeout: STATUS_TIMEOUT })
 
     // Pin the normalized frame time, then render deterministic frames by driving the
     // PIPELINE directly (the CanvasRenderer re-syncs canvas size per frame and can

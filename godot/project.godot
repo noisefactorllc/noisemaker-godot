@@ -1,0 +1,11 @@
+; Noisemaker-Godot — engine project. Open this in the Godot 4.7 editor, or drive
+; it headless-offscreen for the parity harness (RenderingDevice needs a real
+; window, so run NON-headless with --position offscreen).
+config_version=5
+
+[application]
+config/name="noisemaker-godot"
+config/features=PackedStringArray("4.7", "Forward Plus")
+
+[rendering]
+renderer/rendering_method="forward_plus"
