@@ -367,6 +367,9 @@ func execute_pass(p: Dictionary) -> void:
 	else:
 		var ns := str(p.get("namespace"))
 		var fn := str(p.get("func"))
+		# Shaders are keyed by progName (an effect may have several programs, e.g.
+		# blur -> blurH/blurV); the effect DEFINITION (globals/layout) is keyed by func.
+		var prog := str(p.get("progName", fn))
 		var defs: Dictionary = p.get("defines", {})
 		var def := _load_effect_def(ns, fn)
 		var inject := ""
@@ -376,8 +379,8 @@ func execute_pass(p: Dictionary) -> void:
 			inject += "#define %s %d\n" % [k, int(defs[k])]
 		if not def.has("uniformLayout"):
 			inject += _synth_header(_synth_layout(ns, fn, def.get("globals", {})))
-		cache_key = ns + "/" + fn + _defines_key(defs)
-		frag_src = _inject_after_version(_load_fragment(ns, fn), inject)
+		cache_key = ns + "/" + prog + _defines_key(defs)
+		frag_src = _inject_after_version(_load_fragment(ns, prog), inject)
 	var shader := _get_shader(cache_key, frag_src)
 	if not shader.is_valid():
 		return
