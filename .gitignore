@@ -1,0 +1,16 @@
+# Godot
+godot/.godot/
+godot/.import/
+*.translation
+
+# Parity artifacts (generated)
+parity/out/*.png
+parity/out/*.graph.json
+parity/out/*.report.json
+err.tmp
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
