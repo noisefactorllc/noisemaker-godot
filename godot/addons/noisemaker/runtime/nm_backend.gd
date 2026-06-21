@@ -115,13 +115,24 @@ func _make_tex(w: int, h: int, fmt: int) -> RID:
 		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT \
 		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT \
 		| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
-	return rd.texture_create(tf, RDTextureView.new())
+	var rid := rd.texture_create(tf, RDTextureView.new())
+	# Zero-init (matches the reference's null-data textures). Deterministic first-frame
+	# read for feedback/state surfaces; harmless for transients (fully overwritten).
+	rd.texture_clear(rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
+	return rid
 
 func _resolve_dim(d, screen_size: int) -> int:
+	# Subset of reference/04 §9. number | "screen"/"auto"/"input" | "N%". The object
+	# forms ({param}/{screenDivide}/{scale}) and true per-pass "input" sizing are staged;
+	# at top level the input is screen-sized so "input" == screen here.
 	if typeof(d) == TYPE_FLOAT or typeof(d) == TYPE_INT:
 		return max(1, int(d))
-	if typeof(d) == TYPE_STRING and (d == "screen" or d == "auto"):
-		return screen_size
+	if typeof(d) == TYPE_STRING:
+		var s := str(d)
+		if s == "screen" or s == "auto" or s == "input":
+			return screen_size
+		if s.ends_with("%"):
+			return max(1, int(floor(screen_size * s.substr(0, s.length() - 1).to_float() / 100.0)))
 	return screen_size
 
 func allocate_textures(graph: Dictionary) -> void:
@@ -442,11 +453,36 @@ func execute_pass(p: Dictionary) -> void:
 	rd.draw_list_draw(dl, false, 1)
 	rd.draw_list_end()
 
+# True if any pass reads a texId at or before the pass that first writes it — the read
+# depends on a prior frame's content (feedback/state). Such graphs need a multi-frame
+# settle. (Same-surface read+write in ONE pass also trips this; those additionally need
+# ping-pong double-buffering — staged. Separate read/write passes, e.g. feedback's
+# selfTex, work with persistent textures + the frame loop alone.)
+func _has_feedback(graph: Dictionary) -> bool:
+	var passes = graph.get("passes", [])
+	var first_write := {}
+	for i in passes.size():
+		for k in passes[i].get("outputs", {}):
+			var t := str(passes[i]["outputs"][k])
+			if not first_write.has(t):
+				first_write[t] = i
+	for i in passes.size():
+		for k in passes[i].get("inputs", {}):
+			var t := str(passes[i]["inputs"][k])
+			if t != "none" and first_write.has(t) and i <= first_write[t]:
+				return true
+	return false
+
 func render(graph: Dictionary, normalized_time: float = 0.25) -> void:
 	_time = normalized_time
 	allocate_textures(graph)
-	for p in graph.get("passes", []):
-		execute_pass(p)
+	# Feedback/state graphs read a surface before it's (re)written this frame, so they need
+	# the reference's settle count (8 frames at the pinned time). Non-feedback graphs are
+	# deterministic per frame -> a single pass.
+	var frames := 8 if _has_feedback(graph) else 1
+	for _frame in frames:
+		for p in graph.get("passes", []):
+			execute_pass(p)
 	rd.submit()
 	rd.sync()
 
