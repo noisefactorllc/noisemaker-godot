@@ -102,14 +102,74 @@ const EFFECTS_DIR = join(REFERENCE_ROOT, 'shaders', 'effects')
 const GLOBALS_PREFIX = '__noisemaker'
 const STATUS_TIMEOUT = 300000
 
+// Read back the presented render surface as LINEAR FLOAT, quantize to 8-bit, flip
+// to top-down, and encode a PNG buffer. Shared by single-frame + timed-sample modes.
+async function capture (page, globals) {
+  const result = await page.evaluate(({ g }) => {
+    const pipeline = window[g.renderingPipeline]
+    if (!pipeline) return { status: 'error', error: 'no pipeline' }
+    const backend = pipeline.backend
+    const gl = backend?.gl
+    const surface = pipeline.surfaces?.get(pipeline.graph?.renderSurface || 'o0')
+    if (!gl || !surface) return { status: 'error', error: 'no GL surface' }
+    const info = backend.textures?.get(surface.read)
+    if (!info?.handle) return { status: 'error', error: 'no texture handle' }
+    const { handle, width, height, glFormat } = info
+    const fbo = gl.createFramebuffer()
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, handle, 0)
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fbo)
+      return { status: 'error', error: 'FBO incomplete' }
+    }
+    const canFloat = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('WEBGL_color_buffer_float'))
+    const isFloat = glFormat?.type === gl.HALF_FLOAT || glFormat?.type === gl.FLOAT
+    gl.finish()
+    let rgba8
+    if (isFloat && canFloat) {
+      const buf = new Float32Array(width * height * 4)
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, buf)
+      rgba8 = new Array(width * height * 4)
+      for (let i = 0; i < buf.length; i++) {
+        rgba8[i] = Math.max(0, Math.min(255, Math.round(buf[i] * 255)))
+      }
+    } else {
+      const buf = new Uint8Array(width * height * 4)
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, buf)
+      rgba8 = Array.from(buf)
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    gl.deleteFramebuffer(fbo)
+    return { status: 'ok', width, height, pixels: rgba8 }
+  }, { g: globals })
+  if (result.status === 'error') throw new Error(`readback failed: ${result.error}`)
+  // GL textures are bottom-left origin; flip vertically so the PNG is top-down (the
+  // single Y-flip reconciliation point, mirrored by the Godot runner's save).
+  const { width, height, pixels } = result
+  const topDown = Buffer.alloc(width * height * 4)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const src = ((height - 1 - y) * width + x) * 4
+      const dst = (y * width + x) * 4
+      topDown[dst] = pixels[src]
+      topDown[dst + 1] = pixels[src + 1]
+      topDown[dst + 2] = pixels[src + 2]
+      topDown[dst + 3] = pixels[src + 3]
+    }
+  }
+  return encodePng(width, height, topDown)
+}
+
 function parseArgs (argv) {
-  const opts = { time: 0.25, size: 256, backend: 'webgl2' }
+  const opts = { time: 0.25, size: 256, backend: 'webgl2', runSeconds: 0, sampleEvery: 5 }
   const pos = []
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--time') opts.time = parseFloat(argv[++i])
     else if (a === '--size') opts.size = parseInt(argv[++i], 10)
     else if (a === '--backend') opts.backend = argv[++i]
+    else if (a === '--run-seconds') opts.runSeconds = parseInt(argv[++i], 10)
+    else if (a === '--sample-every') opts.sampleEvery = parseInt(argv[++i], 10)
     else pos.push(a)
   }
   opts.programPath = pos[0]
@@ -155,6 +215,7 @@ async function main () {
 
   const session = new BrowserSession({ backend: opts.backend })
   let pngBuffer
+  let sampled = false
   try {
     await session.setup()
     const page = session.page
@@ -257,84 +318,45 @@ async function main () {
       return true
     }, opts.size, { timeout: STATUS_TIMEOUT })
 
-    // Pin the normalized frame time, then render deterministic frames by driving the
-    // PIPELINE directly (the CanvasRenderer re-syncs canvas size per frame and can
-    // revert the resize; pipeline.render does the GPU work the readback reads).
-    await page.evaluate(({ time, frames, size }) => {
-      if (window.__noisemakerSetPausedTime) window.__noisemakerSetPausedTime(time)
-      const p = window.__noisemakerRenderingPipeline
-      const r = window.__noisemakerCanvasRenderer
-      for (let i = 0; i < frames; i++) {
-        if (p && p.render) p.render(time)
-        else if (r && r.render) r.render(time)
+    // ---- 3. Render + capture: one pinned frame, or timed samples for statefuls.
+    if (opts.runSeconds > 0) {
+      // Timed-sampling mode (fluid/feedback sims): step total_frames at 1/600
+      // normalized dt (one 60fps frame in the 10s loop), driving pipeline.render(t)
+      // DIRECTLY (NO setPausedTime — let lastTime advance so deltaTime>0 and the sim
+      // EVOLVES), capturing every sample_every seconds to <name>.golden.t<sec>.png.
+      const everyFrames = opts.sampleEvery * 60
+      const totalFrames = opts.runSeconds * 60
+      const numSamples = Math.max(1, Math.floor(totalFrames / everyFrames))
+      for (let s = 0; s < numSamples; s++) {
+        await page.evaluate(({ everyFrames, startFrame }) => {
+          const p = window.__noisemakerRenderingPipeline
+          for (let i = 0; i < everyFrames; i++) {
+            const t = ((startFrame + i + 1) / 600) % 1.0
+            if (p && p.render) p.render(t)
+          }
+        }, { everyFrames, startFrame: s * everyFrames })
+        const buf = await capture(page, globals)
+        const sec = (s + 1) * opts.sampleEvery
+        const sp = join(opts.outDir, `${programName}.golden.t${sec}.png`)
+        writeFileSync(sp, buf)
+        process.stderr.write(`[parity] wrote ${sp}\n`)
       }
-    }, { time: opts.time, frames: 8, size: opts.size })
-
-    // Read back the presented o0 surface as LINEAR FLOAT (the reference RTs are
-    // ARGBHalf linear). This matches the WebGL2 float readback in the repo's
-    // playwright spec. We capture the surface texture, NOT the composited canvas
-    // (which would be blended over the page background and gamma-encoded).
-    const result = await page.evaluate(({ g }) => {
-      const pipeline = window[g.renderingPipeline]
-      if (!pipeline) return { status: 'error', error: 'no pipeline' }
-      const backend = pipeline.backend
-      const gl = backend?.gl
-      const surface = pipeline.surfaces?.get(pipeline.graph?.renderSurface || 'o0')
-      if (!gl || !surface) return { status: 'error', error: 'no GL surface' }
-      const info = backend.textures?.get(surface.read)
-      if (!info?.handle) return { status: 'error', error: 'no texture handle' }
-      const { handle, width, height, glFormat } = info
-      const fbo = gl.createFramebuffer()
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, handle, 0)
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.deleteFramebuffer(fbo)
-        return { status: 'error', error: 'FBO incomplete' }
-      }
-      const canFloat = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('WEBGL_color_buffer_float'))
-      const isFloat = glFormat?.type === gl.HALF_FLOAT || glFormat?.type === gl.FLOAT
-      gl.finish()
-      let rgba8
-      if (isFloat && canFloat) {
-        const buf = new Float32Array(width * height * 4)
-        gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, buf)
-        // Quantise linear float -> 8-bit for a comparable PNG. The Unity runner
-        // must write the SAME linear-encoded 8-bit (no sRGB) for compare.py.
-        rgba8 = new Array(width * height * 4)
-        for (let i = 0; i < buf.length; i++) {
-          rgba8[i] = Math.max(0, Math.min(255, Math.round(buf[i] * 255)))
+      sampled = true
+    } else {
+      // Pin the normalized frame time, then render 8 deterministic frames by driving
+      // the PIPELINE directly (the CanvasRenderer re-syncs canvas size per frame and
+      // can revert the resize; pipeline.render does the GPU work the readback reads).
+      await page.evaluate(({ time, frames }) => {
+        if (window.__noisemakerSetPausedTime) window.__noisemakerSetPausedTime(time)
+        const p = window.__noisemakerRenderingPipeline
+        const r = window.__noisemakerCanvasRenderer
+        for (let i = 0; i < frames; i++) {
+          if (p && p.render) p.render(time)
+          else if (r && r.render) r.render(time)
         }
-      } else {
-        const buf = new Uint8Array(width * height * 4)
-        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, buf)
-        rgba8 = Array.from(buf)
-      }
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-      gl.deleteFramebuffer(fbo)
-      return { status: 'ok', width, height, pixels: rgba8 }
-    }, { g: globals })
-
-    if (result.status === 'error') throw new Error(`readback failed: ${result.error}`)
-
-    // Encode PNG with bottom-left origin flipped to top-down (PNG row 0 = top).
-    // GL textures are bottom-left origin; we flip vertically here so the golden
-    // PNG is top-down. The Unity runner applies the SAME final orientation —
-    // this is the single Y-flip reconciliation point (reference/04 §coords,
-    // NMBlit.shader). // TODO(verify): confirm orientation against a known
-    // gradient program once both PNGs exist.
-    const { width, height, pixels } = result
-    const topDown = Buffer.alloc(width * height * 4)
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const src = ((height - 1 - y) * width + x) * 4
-        const dst = (y * width + x) * 4
-        topDown[dst] = pixels[src]
-        topDown[dst + 1] = pixels[src + 1]
-        topDown[dst + 2] = pixels[src + 2]
-        topDown[dst + 3] = pixels[src + 3]
-      }
+      }, { time: opts.time, frames: 8 })
+      pngBuffer = await capture(page, globals)
     }
-    pngBuffer = encodePng(width, height, topDown)
 
     const consoleErrors = session.getConsoleMessages().map(m => m.text)
     if (consoleErrors.length) {
@@ -344,9 +366,11 @@ async function main () {
     await session.teardown()
   }
 
-  const pngPath = join(opts.outDir, `${programName}.golden.png`)
-  writeFileSync(pngPath, pngBuffer)
-  process.stderr.write(`[parity] wrote ${pngPath} (${opts.size}x${opts.size}, time=${opts.time}, backend=${opts.backend})\n`)
+  if (!sampled) {
+    const pngPath = join(opts.outDir, `${programName}.golden.png`)
+    writeFileSync(pngPath, pngBuffer)
+    process.stderr.write(`[parity] wrote ${pngPath} (${opts.size}x${opts.size}, time=${opts.time}, backend=${opts.backend})\n`)
+  }
 }
 
 main().catch(err => {
