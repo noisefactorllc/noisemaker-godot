@@ -57,6 +57,23 @@ in a no-layout shader — the backend synthesizes the layout and injects them. A
 bare engine names: `resolution`, `time`, `aspectRatio`, `tileOffset`, `fullResolution`,
 `renderScale`. Param names are the `uniform` fields in the effect's `<func>.json` globals.
 
+⚠️ **Reserved-name collision.** Those 8 engine names (`resolution`, `time`, `aspectRatio`,
+`tileOffset`, `fullResolution`, `renderScale`, `deltaTime`, `frame`) and every param name
+are injected as `#define <name> data[slot].comp`. A WGSL `let aspectRatio = …` then expands
+to `float data[0].w = …` → glslang error *"array size must be a positive integer"*. If the
+WGSL declares a **local variable OR a helper function parameter** with one of these names
+(or a param name), **rename it** (e.g. `aspectRatio`→`ar`, `resolution`→`res`, `offset`→
+`palOffset`, helper param `time`→`timeArg`) — a pure symbol rename, no behavior change (the
+HLSL ports do the same). The bare name must remain only at the `main()` use sites where the
+`#define` must resolve.
+
+⚠️⚠️ **Single-letter params `x`/`y` (and any 1-char name) are the nastiest:** `#define x
+data[3].x` rewrites *every* `.x` swizzle (`st.x` → `st.data[3].x`) and re-scans into other
+macros. Capture them into real locals at the top of `main` and `#undef x`/`#undef y` before
+any further use, or index by component (`st[0]`/`st[1]`) which is collision-proof. (Affects
+`repeat`/`scroll`/`translate`.) A future backend option is to inject real global vars instead
+of macros — until then, follow this.
+
 ## Translation table (WGSL → Godot-GLSL)
 
 | Concept | WGSL | Godot GLSL (`#version 450`) | Notes |

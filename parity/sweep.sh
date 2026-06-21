@@ -12,6 +12,8 @@ GODOT="${GODOT:-/Applications/Godot.app/Contents/MacOS/Godot}"
 tol_for() {
 	case "$1" in
 		newton) echo "255 0.98" ;;   # Newton-fractal root basins = Julia set (chaotic)
+		edge)   echo "8 0.98" ;;      # ×2 contrast convolution amplifies upstream noise 1-LSB (<0.1% px)
+		pinch)  echo "6 0.98" ;;      # AA dFdx/dFdy taps hit neighbor texel under Metal vs WebGPU (<0.1% px)
 		*)      echo "2 0.98" ;;
 	esac
 }
