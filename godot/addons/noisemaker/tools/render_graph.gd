@@ -1,15 +1,23 @@
 # render_graph.gd — offline candidate renderer (the analog of Unity's NMParityRunner).
-# Runs a normalized render-graph JSON through the RenderingDevice executor and writes
-# a PNG. MUST run non-headless (RenderingDevice is null under --headless); position
-# the window offscreen.
+# Runs a normalized render-graph through the RenderingDevice executor and writes a PNG. MUST run
+# non-headless (RenderingDevice is null under --headless); position the window offscreen.
+#
+# Graph source (one of):
+#   --dsl <abs.dsl>     build the graph IN-ENGINE via the GDScript compiler (self-contained; no
+#                       reference / export-graph.mjs). This is the production path.
+#   --graph <abs.json>  read a pre-normalized graph JSON (e.g. a reference golden, for parity diffing).
 #
 #   Godot --path godot --script res://addons/noisemaker/tools/render_graph.gd \
-#         --position 5000,5000 -- --graph <abs.json> --out <abs.png> --size 256
+#         --position 5000,5000 -- (--dsl <abs.dsl> | --graph <abs.json>) --out <abs.png> --size 256
 extends SceneTree
+
+const Orchestrator := preload("res://addons/noisemaker/compiler/graph/orchestrator.gd")
+const EffectRegistry := preload("res://addons/noisemaker/compiler/lang/effect_registry.gd")
 
 func _init() -> void:
 	var a := OS.get_cmdline_user_args()
 	var graph_path := ""
+	var dsl_path := ""
 	var out_path := ""
 	var size := 256
 	var run_seconds := 0       # >0 => timed-sampling mode for stateful sims
@@ -19,6 +27,8 @@ func _init() -> void:
 		match a[i]:
 			"--graph":
 				graph_path = a[i + 1]; i += 2
+			"--dsl":
+				dsl_path = a[i + 1]; i += 2
 			"--out":
 				out_path = a[i + 1]; i += 2
 			"--size":
@@ -29,8 +39,8 @@ func _init() -> void:
 				sample_every_sec = int(a[i + 1]); i += 2
 			_:
 				i += 1
-	if graph_path == "" or out_path == "":
-		printerr("usage: -- --graph <json> --out <png> [--size 256] [--run-seconds N --sample-every S]")
+	if (graph_path == "" and dsl_path == "") or out_path == "":
+		printerr("usage: -- (--dsl <dsl> | --graph <json>) --out <png> [--size 256] [--run-seconds N --sample-every S]")
 		quit(1); return
 
 	var rd := RenderingServer.create_local_rendering_device()
@@ -38,14 +48,25 @@ func _init() -> void:
 		printerr("RD_NULL: RenderingDevice unavailable (run non-headless, with a window)")
 		quit(1); return
 
-	var f := FileAccess.open(graph_path, FileAccess.READ)
-	if f == null:
-		printerr("cannot read graph: ", graph_path)
-		quit(1); return
-	var graph = JSON.parse_string(f.get_as_text())
-	f.close()
+	var graph
+	if dsl_path != "":
+		# Self-contained path: compile the DSL to a render graph in-engine.
+		var src := FileAccess.get_file_as_string(dsl_path)
+		if src == "":
+			printerr("cannot read dsl: ", dsl_path)
+			quit(1); return
+		var reg := EffectRegistry.new()
+		reg.load_all()
+		graph = Orchestrator.new(reg).build_graph(src)
+	else:
+		var f := FileAccess.open(graph_path, FileAccess.READ)
+		if f == null:
+			printerr("cannot read graph: ", graph_path)
+			quit(1); return
+		graph = JSON.parse_string(f.get_as_text())
+		f.close()
 	if typeof(graph) != TYPE_DICTIONARY:
-		printerr("bad graph JSON: ", graph_path)
+		printerr("bad graph: ", graph_path if graph_path != "" else dsl_path)
 		quit(1); return
 
 	var Backend = preload("res://addons/noisemaker/runtime/nm_backend.gd")
