@@ -221,12 +221,10 @@ func allocate_textures(graph: Dictionary) -> void:
 	if rs != null:
 		render_surface_tex = "global_" + str(rs)
 	# Any output/input texId not declared in graph.textures (e.g. global_o0/o1, the user
-	# surfaces) gets a screen-sized rgba8 flat texture — matching the reference backend's
-	# resolveFormat default (`formats[format] || formats['rgba8']`, webgl2.js:1717). This is a
-	# RANGE constraint, not just storage: undeclared user surfaces CLAMP to [0,1]. The target
-	# feeds o0 (HDR particle trail, blurred) back into navierStokes; clamping it to rgba8 like
-	# the reference keeps the fluid solve in sync (an rgba16f o0 preserved out-of-range values
-	# and diverged the chaotic sim). Ping-pong surfaces are already allocated; _ensure_tex skips.
+	# surfaces) gets a screen-sized rgba16f flat texture — the reference's o0..o7 are HDR
+	# (an rgba8 default clamps intermediates to [0,1] and regressed distortion/focusBlur/
+	# rotate/step/thresholdMix, whose o0 carries out-of-[0,1] values the reference preserves).
+	# Ping-pong surfaces are already allocated above; _ensure_tex skips them.
 	for p in graph.get("passes", []):
 		for k in p.get("outputs", {}):
 			_ensure_tex(str(p["outputs"][k]))
@@ -295,10 +293,10 @@ func _ensure_tex(tex_id: String) -> void:
 	if _pingpong.has(tex_id):
 		return
 	if not _textures.has(tex_id):
-		var f8 := _data_format("rgba8")
-		_textures[tex_id] = _make_tex(screen.x, screen.y, f8)
+		var f16 := _data_format("rgba16f")
+		_textures[tex_id] = _make_tex(screen.x, screen.y, f16)
 		_tex_dims[tex_id] = screen
-		_tex_fmt[tex_id] = f8
+		_tex_fmt[tex_id] = f16
 
 # --- shader assembly ------------------------------------------------------
 
