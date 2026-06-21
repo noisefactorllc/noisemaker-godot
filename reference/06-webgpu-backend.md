@@ -7,7 +7,7 @@ and WebGL2 differ, WebGPU/Dawn (D3D-style clip space, top-left texel origin) is 
 closer match to Unity HLSL/D3D11. **A Unity port should mirror WGSL/WebGPU semantics,
 not WebGL2.**
 
-This backend extends a generic `Backend` base class (`../backend.js`). It holds the
+This backend extends a generic `Backend` base class (`backend.js`). It holds the
 texture registry (`this.textures`, a `Map<id, texRecord>`), program registry
 (`this.programs`), etc. The base `Backend` provides `this.textures`, `this.programs`,
 `this.capabilities`.
