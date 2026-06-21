@@ -23,19 +23,22 @@
 //   node convert-definitions.mjs --dry-run      # print summary, write nothing
 //
 // Env:
-//   NM_REFERENCE_ROOT  override reference repo root (default: ../.. of this file)
-//   NM_OUT_DIR         override output dir (default: ../unity/.../Effects)
+//   NM_REFERENCE_ROOT  path to the Noisemaker reference repo (REQUIRED; no default, no sibling assumed)
+//   NM_OUT_DIR         override output dir (default: the repo godot/addons/noisemaker/effects)
 
 import { readdirSync, statSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join, dirname, resolve, basename } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-// Reference engine lives in the sibling `noisemaker` repo (this repo was split
-// out of noisemaker/noisemaker-hlsl/). Override with NM_REFERENCE_ROOT.
-const REFERENCE_ROOT = process.env.NM_REFERENCE_ROOT
-  ? resolve(process.env.NM_REFERENCE_ROOT)
-  : resolve(__dirname, '..', '..', 'noisemaker')
+// Reference engine path comes from NM_REFERENCE_ROOT (a checkout of the Noisemaker
+// reference repo); this repo does not assume a sibling checkout.
+if (!process.env.NM_REFERENCE_ROOT) {
+  throw new Error('NM_REFERENCE_ROOT is not set. Point it at a checkout of the Noisemaker\n'
+    + 'reference repo (the JS/WebGL2 engine), e.g. NM_REFERENCE_ROOT=/path/to/noisemaker.\n'
+    + 'This repo does NOT assume a sibling checkout.')
+}
+const REFERENCE_ROOT = resolve(process.env.NM_REFERENCE_ROOT)
 const EFFECTS_DIR = join(REFERENCE_ROOT, 'shaders', 'effects')
 const OUT_DIR = process.env.NM_OUT_DIR
   ? resolve(process.env.NM_OUT_DIR)

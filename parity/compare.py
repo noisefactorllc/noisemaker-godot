@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare two PNGs for the noisemaker-hlsl parity harness.
+"""Compare two PNGs for the noisemaker-godot parity harness.
 
 Loads a GOLDEN reference PNG (from parity/export-and-render.mjs) and a CANDIDATE
 PNG (from the Unity NMParityRunner), computes max-abs-diff and a simple global

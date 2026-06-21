@@ -16,9 +16,9 @@
 //   node export-graph.mjs "<dsl>"            # prints JSON to stdout
 //
 // Env:
-//   NM_REFERENCE_ROOT   override the reference repo root (default: ../.. of this file)
+//   NM_REFERENCE_ROOT   path to the Noisemaker reference repo (REQUIRED; no default, no sibling assumed)
 //
-// Requires the sibling reference engine at <root>/shaders/src/index.js. No build
+// Requires the Noisemaker reference engine at $NM_REFERENCE_ROOT/shaders/src/index.js. No build
 // step — the reference is plain ESM. See tools/package.json.
 
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs'
@@ -27,11 +27,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-// Reference engine lives in the sibling `noisemaker` repo (this repo was split
-// out of noisemaker/noisemaker-hlsl/). Override with NM_REFERENCE_ROOT.
-const REFERENCE_ROOT = process.env.NM_REFERENCE_ROOT
-  ? resolve(process.env.NM_REFERENCE_ROOT)
-  : resolve(__dirname, '..', '..', 'noisemaker')
+// Reference engine path comes from NM_REFERENCE_ROOT (a checkout of the Noisemaker
+// reference repo); this repo does not assume a sibling checkout.
+if (!process.env.NM_REFERENCE_ROOT) {
+  throw new Error('NM_REFERENCE_ROOT is not set. Point it at a checkout of the Noisemaker\n'
+    + 'reference repo (the JS/WebGL2 engine), e.g. NM_REFERENCE_ROOT=/path/to/noisemaker.\n'
+    + 'This repo does NOT assume a sibling checkout.')
+}
+const REFERENCE_ROOT = resolve(process.env.NM_REFERENCE_ROOT)
 
 const SRC_INDEX = join(REFERENCE_ROOT, 'shaders', 'src', 'index.js')
 const EFFECTS_DIR = join(REFERENCE_ROOT, 'shaders', 'effects')

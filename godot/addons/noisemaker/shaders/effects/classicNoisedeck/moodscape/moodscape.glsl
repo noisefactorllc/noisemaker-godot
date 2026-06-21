@@ -1,7 +1,7 @@
 #version 450
 // classicNoisedeck/moodscape (Moodscape) — ported VERBATIM from the canonical WGSL
 // source: shaders/effects/classicNoisedeck/moodscape/wgsl/moodscape.wgsl. Cross-checked
-// against the HLSL port (unity/.../Shaders/Effects/classicNoisedeck/Moodscape.hlsl).
+// against the HLSL port (classicNoisedeck/Moodscape).
 // Refracted value noise with multiple color modes; single render pass; generator (no
 // inputs). Top-left origin (Godot/Vulkan, matches WGSL) — NO Y-flip (runtime applies the
 // single global flip).

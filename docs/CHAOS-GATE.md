@@ -6,7 +6,7 @@ feeds it into navierStokes). Those render correctly, deterministically, and stay
 they're a *different instance* of the chaos, not a pixel match (full-chain SSIM 0.5–0.73 over the
 30 s / 5 s sampling). The cause is a **single `pow`**: a spec-legal ~1-ULP rounding difference in
 Godot's shader-compiler that a chaotic feedback loop amplifies into a different particle field.
-This is not a port bug — the shader is byte-identical to the `noisemaker-hlsl` port, which gets the
+This is not a port bug — the shader is byte-identical to the Unity/HLSL port, which gets the
 same target byte-identical. It is the engine's transcendental codegen, which is not reachable from
 the addon, shader, driver, or environment.
 
@@ -105,7 +105,7 @@ stateful sims at their stable regimes.
 **The target is stable, not broken.** Blown-out (pure-white) pixels hold at ~0.5–1 % of the frame,
 in line with the golden's ~0–0.8 %; mean brightness stays bounded and oscillates with the loop
 rather than climbing. The over-deposit / white-out that an unfixed Metal build would show is
-prevented by two fixes ported from `noisemaker-hlsl@abb9578`:
+prevented by two fixes ported from the Unity/HLSL port (commit abb9578):
 
 - **density-cull precision** — `fract(particleID·GR)` loses float32 precision at ~1 M agents
   (step ~0.06 near 6.5e5 → quantizes to ~16 buckets → Metal over-deposits ~8× vs ANGLE). A hi/lo
@@ -117,7 +117,7 @@ prevented by two fixes ported from `noisemaker-hlsl@abb9578`:
 
 - **three.js, babylon** get this exact target *byte-identical* — because they **are** WebGL2/ANGLE,
   the same compiler as the golden, so their `pow` produces the same bits.
-- **noisemaker-hlsl** matched on Unity/Metal — its HLSL→Metal `pow` happens to align with ANGLE's.
+- **The Unity/HLSL port** matched on Unity/Metal — its HLSL→Metal `pow` happens to align with ANGLE's.
   Its `Flow.hlsl` oklab is byte-identical to this port's, and its *only* fixes for this target were
   the frac-cull + nav-clamp above (which this port also applies).
 - **Godot** is the outlier: its GLSL→SPIR-V→Metal `pow` rounds that one bit its own (legal) way.

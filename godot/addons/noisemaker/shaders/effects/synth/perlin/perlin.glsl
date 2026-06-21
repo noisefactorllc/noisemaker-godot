@@ -3,7 +3,7 @@
 // Perlin-like gradient noise with quintic interpolation and optional domain warp.
 // 2D mode uses time-animated gradient angles for a seamless loop; 3D mode samples a
 // cross-section through a z-periodic 3D noise volume. Cross-checked against the
-// bottom-left HLSL port (../noisemaker-hlsl/.../Effects/synth/Perlin.hlsl).
+// bottom-left HLSL port (the HLSL port's synth/Perlin).
 //
 // No-layout effect (like solid.glsl / osc2d.glsl): the backend SYNTHESIZES the Params
 // UBO and injects, after #version, `#define <name> data[slot].comp` for every engine

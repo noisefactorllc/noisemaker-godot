@@ -1,12 +1,17 @@
 # noisemaker-godot
 
-A parallel port of the [Noisemaker shader engine](../noisemaker/shaders) to **Godot 4.7**.
-It renders **live procedural textures from the Polymorphic DSL** through Godot's
-low-level `RenderingDevice` GPGPU pipeline, aiming to be **pixel-identical** (within
-float→8-bit rounding) to the JS/WebGL2 reference engine. It is the Godot sibling of
-the Unity/HLSL port [`../noisemaker-hlsl`](../noisemaker-hlsl) and reuses that port's
-engine-agnostic "brain" verbatim (the re-implementer specs, the golden graph exporter,
-the parity comparator).
+A parallel port of the **Noisemaker shader engine** to **Godot 4.7**. It renders
+**live procedural textures from the Polymorphic DSL** through Godot's low-level
+`RenderingDevice` GPGPU pipeline, aiming to be **pixel-identical** (within float→8-bit
+rounding) to the JS/WebGL2 reference engine. It is the Godot sibling of the Unity/HLSL
+Noisemaker port and reuses that port's engine-agnostic "brain" verbatim (the
+re-implementer specs, the golden graph exporter, the parity comparator).
+
+> **Dev tooling needs the reference engine.** The golden-graph exporter and golden-image
+> harness import the unchanged JS Noisemaker compiler/renderer. Point them at a checkout of
+> the reference repo with `NM_REFERENCE_ROOT=/path/to/noisemaker` — this repo does **not**
+> assume any sibling checkout. The Godot addon itself (`godot/addons/noisemaker/`) is
+> self-contained and needs none of this.
 
 > **🚧 WIP — early development.** The render-graph executor and the ported effect set are
 > pixel-parity on Apple Silicon (Metal). The **agents/points capability** (MRT + procedural

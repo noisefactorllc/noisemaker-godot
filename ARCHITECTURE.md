@@ -1,10 +1,9 @@
 # noisemaker-godot — Architecture
 
-A parallel port of the Noisemaker shader engine (`../noisemaker/shaders`) to Godot 4.7 /
-`RenderingDevice` GLSL. Goal: **live procedural texture from the Polymorphic DSL,
-pixel-identical to the JS reference engine.** ProgramState and UI bindings are out of
-scope. It mirrors the Unity port (`../noisemaker-hlsl`) structurally and reuses its
-engine-agnostic assets.
+A parallel port of the Noisemaker shader engine to Godot 4.7 / `RenderingDevice` GLSL.
+Goal: **live procedural texture from the Polymorphic DSL, pixel-identical to the JS
+reference engine.** ProgramState and UI bindings are out of scope. It mirrors the
+Unity/HLSL Noisemaker port structurally and reuses its engine-agnostic assets.
 
 ## The seam: the Render Graph
 
@@ -23,7 +22,8 @@ gives the graph **two producers**:
 
 - **(a) Golden / offline** — `tools/export-graph.mjs` runs the *unchanged reference*
   `compileGraph` and serialises the graph to JSON. Zero parity risk (it is the reference
-  code). Reused verbatim from the Unity port (it only needs the sibling `../noisemaker`).
+  code). Reused verbatim from the Unity port; it imports the reference engine from
+  `NM_REFERENCE_ROOT` (a checkout of the Noisemaker reference repo) — no sibling assumed.
 - **(b) Live / in-engine** *(staged)* — a GDScript port of the DSL frontend under
   `addons/noisemaker/compiler/`, validated by diffing its JSON against (a).
 

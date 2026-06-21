@@ -2,7 +2,7 @@
 // classicNoisedeck/noise (Noise) — LEGACY Noisedeck animated multi-resolution noise
 // synthesizer. Ported PIXEL-IDENTICALLY from the canonical WGSL source:
 //   shaders/effects/classicNoisedeck/noise/wgsl/noise.wgsl
-// (cross-checked against unity/.../Shaders/Effects/classicNoisedeck/Noise.hlsl).
+// (cross-checked against the HLSL port's classicNoisedeck/Noise).
 //
 // Single render pass (program "noise"). Generator (no texture inputs). Top-left
 // origin (Godot/Vulkan, matches WGSL) — NO per-effect Y-flip; the runtime applies

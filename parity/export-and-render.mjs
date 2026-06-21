@@ -27,7 +27,7 @@
 // Writes  <outDir>/<programName>.golden.png  and  <outDir>/<programName>.graph.json
 //
 // Prereqs: Node, Playwright + a system Chrome (the harness launches chromium),
-// and the reference repo present as the sibling tree (../../shaders, ../../demo).
+// and the reference repo at $NM_REFERENCE_ROOT (its shaders/ and demo/ trees).
 // See parity/README.md.
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -35,12 +35,15 @@ import { dirname, resolve, basename, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-// Reference (golden) engine lives in the sibling `noisemaker` repo. Override
+// Reference (golden) engine path comes from NM_REFERENCE_ROOT. Set
 // with NM_REFERENCE_ROOT if it's elsewhere. (This repo was split out of
-// noisemaker/noisemaker-hlsl/, where the default was just `../..`.)
-const REFERENCE_ROOT = process.env.NM_REFERENCE_ROOT
-  ? resolve(process.env.NM_REFERENCE_ROOT)
-  : resolve(__dirname, '..', '..', 'noisemaker')
+// a monorepo.)
+if (!process.env.NM_REFERENCE_ROOT) {
+  throw new Error('NM_REFERENCE_ROOT is not set. Point it at a checkout of the Noisemaker\n'
+    + 'reference repo (the JS/WebGL2 engine), e.g. NM_REFERENCE_ROOT=/path/to/noisemaker.\n'
+    + 'This repo does NOT assume a sibling checkout.')
+}
+const REFERENCE_ROOT = resolve(process.env.NM_REFERENCE_ROOT)
 
 const HARNESS = join(REFERENCE_ROOT, 'vendor', 'shade-mcp', 'harness', 'index.js')
 const EXPORT_GRAPH = join(__dirname, '..', 'tools', 'export-graph.mjs')

@@ -1,7 +1,7 @@
 #version 450
 // classicNoisedeck/fractal — ported PIXEL-IDENTICALLY from the canonical WGSL source
 //   shaders/effects/classicNoisedeck/fractal/wgsl/fractal.wgsl
-// (cross-checked against noisemaker-hlsl .../Effects/classicNoisedeck/Fractal.hlsl).
+// (cross-checked against the HLSL port's classicNoisedeck/Fractal).
 //
 // Generator (no texture inputs). Single render pass. Layout effect: the effect's
 // reference uniformLayout is PRESENT (effects/classicNoisedeck/fractal.json), so this

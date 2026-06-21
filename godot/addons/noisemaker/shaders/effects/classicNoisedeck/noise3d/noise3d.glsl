@@ -2,7 +2,7 @@
 // classicNoisedeck/noise3d — ported PIXEL-IDENTICALLY from the canonical WGSL source
 //   shaders/effects/classicNoisedeck/noise3d/wgsl/noise3d.wgsl
 // Cross-checked against the top-left HLSL port
-//   ../noisemaker-hlsl/.../Shaders/Effects/classicNoisedeck/Noise3d.hlsl
+//   the HLSL port's classicNoisedeck/Noise3d
 //
 // Generator (no texture inputs). Single render pass. Ray-marches 3D noise volumes
 // (simplex / cellular / voronoi / sine / spheres / cubes / wavy planes) and colorizes

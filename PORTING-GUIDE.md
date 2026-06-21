@@ -10,8 +10,8 @@ style preference.
 1. **Port from the WGSL source, not the GLSL.** WGSL is top-left / D3D-oriented, exactly
    like Godot's Vulkan `RenderingDevice`. Porting from WGSL means **no per-effect Y-flip**
    (the runtime applies one global flip at present). Use the matching HLSL port
-   (`../noisemaker-hlsl/.../Shaders/Effects/<ns>/<Name>.hlsl`) as a cross-check — it is
-   already a correct WGSL→top-left port. Use the reference GLSL only to disambiguate.
+   (the Unity/HLSL Noisemaker port's `Shaders/Effects/<ns>/<Name>.hlsl`) as a cross-check —
+   it is already a correct WGSL→top-left port. Use the reference GLSL only to disambiguate.
 2. **Port helpers verbatim, per effect.** `pcg`/`prng`/`random`/`map`/`periodicFunction`/
    `positiveModulo` (and `PI`/`TAU`) are the *only* shared primitives, in
    `include/nm_core.glsl`. Everything else — `rotate2D`, distance metrics, `smin`, `shape`,
