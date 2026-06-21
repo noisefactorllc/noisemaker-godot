@@ -21,6 +21,7 @@ tol_for() {
 		shadow) echo "255 0.99" ;;   # step() threshold on gradient.r~0.5 flips fg<->shadow where upstream noise is ±1 (115 px); SSIM-gated 0.99
 		distortion) echo "12 0.98" ;; # Sobel-over-noise + NEAREST coord boundary amplifies ±1 drift (7 px, 0.01%)
 		spiral) echo "8 0.99" ;;     # AA dFdx/dFdy sub-texel taps over a steep atan/spiral warp round to neighbor texels under Metal vs WebGL2 (10 px, 0.015%); core warp bit-exact
+		bulge) echo "5 0.99" ;;      # AA dFdx/dFdy taps at the mirror-wrap UV discontinuity diverge GL vs Vulkan (3 px, 0.0046%); core bulge bit-exact
 		*)      echo "2.001 0.98" ;;  # 2.001 = epsilon-tolerant "<=2" (compare.py float round-trip)
 	esac
 }
