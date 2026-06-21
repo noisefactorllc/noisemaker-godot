@@ -10,7 +10,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NAME="${1:?usage: run.sh <name> [tol] [ssim_min] [size]}"
-TOL="${2:-2}"
+# Default 2.001 (not 2): compare.py computes max-abs-diff as float ((x-y)/255*255),
+# so a TRUE 8-bit diff of 2 reports ~2.0000035 and would false-fail a strict "<=2".
+# 2.001 accepts true diffs <=2 and still rejects >=3.
+TOL="${2:-2.001}"
 SSIM="${3:-0.98}"
 SIZE="${4:-256}"
 GODOT="${GODOT:-/Applications/Godot.app/Contents/MacOS/Godot}"

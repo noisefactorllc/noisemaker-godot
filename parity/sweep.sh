@@ -14,7 +14,8 @@ tol_for() {
 		newton) echo "255 0.98" ;;   # Newton-fractal root basins = Julia set (chaotic)
 		edge)   echo "8 0.98" ;;      # ×2 contrast convolution amplifies upstream noise 1-LSB (<0.1% px)
 		pinch)  echo "6 0.98" ;;      # AA dFdx/dFdy taps hit neighbor texel under Metal vs WebGPU (<0.1% px)
-		*)      echo "2 0.98" ;;
+		crt)    echo "3 0.98" ;;      # transcendental cos/pow/floor flips 1 texel index at a seam (1 px)
+		*)      echo "2.001 0.98" ;;  # 2.001 = epsilon-tolerant "<=2" (compare.py float round-trip)
 	esac
 }
 
