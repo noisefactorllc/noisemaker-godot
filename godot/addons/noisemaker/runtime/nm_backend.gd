@@ -68,6 +68,21 @@ var render_surface_tex := ""
 var _time := 0.25
 var _render_scale := 1.0
 
+# Double-buffered "ping-pong" surfaces (reference/04 §6/§8/§10). A `global_<name>`
+# texId that is BOTH read and written by passes gets a physical read/write texture
+# pair; inputs resolve to the current read buffer, outputs to the current write
+# buffer, swapped within-frame after each write and at end-of-frame (state surfaces
+# persist their final binding, display surfaces toggle). Write-only globals (o0, the
+# present target) stay as flat single textures — see allocate_textures.
+var _surfaces := {}        # bareName -> {"read": texId, "write": texId}
+var _frame_read := {}      # bareName -> texId (this frame's read buffer)
+var _frame_write := {}     # bareName -> texId (this frame's write target)
+var _pingpong := {}        # global texId -> bareName (the double-buffered set)
+var _black_tex: RID        # 1x1 zero texture bound for "none" inputs (reference BlackTex)
+var _samplers := {}        # shader cache_key -> [{"name":String,"binding":int}]
+var _sampler_re: RegEx
+var _state_node_re: RegEx  # matches particle state-node surface names (isStateSurface)
+
 func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> void:
 	rd = p_rd
 	addon_dir = p_addon_dir
@@ -84,6 +99,17 @@ func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> vo
 	ss.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
 	ss.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
 	_sampler = rd.sampler_create(ss)
+	# 1x1 zero texture bound for "none" sampler inputs so binding indices stay aligned
+	# with the shader's declared samplers (matches the reference backend's BlackTex).
+	_black_tex = _make_tex(1, 1, _data_format("rgba16f"))
+	# Parses `layout(... binding = N) uniform sampler2D NAME;` so set-0 inputs can be
+	# bound BY NAME (both reference backends bind by name) — a pass may list more inputs
+	# than the shader uses (e.g. cellularAutomata's render pass), and the SPIR-V compiler
+	# strips unused samplers, so only declared+used names may be bound.
+	_sampler_re = RegEx.new()
+	_sampler_re.compile("binding\\s*=\\s*(\\d+)\\s*\\)\\s*uniform\\s+sampler2D\\s+(\\w+)")
+	_state_node_re = RegEx.new()
+	_state_node_re.compile("^(xyz|vel|rgba|points_trail)_node_\\d+$")
 	var verts := PackedFloat32Array([-1.0, -1.0, 3.0, -1.0, -1.0, 3.0])
 	var vb := verts.to_byte_array()
 	var vbuf := rd.vertex_buffer_create(vb.size(), vb)
@@ -121,10 +147,12 @@ func _make_tex(w: int, h: int, fmt: int) -> RID:
 	rd.texture_clear(rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
 	return rid
 
-func _resolve_dim(d, screen_size: int) -> int:
-	# Subset of reference/04 §9. number | "screen"/"auto"/"input" | "N%". The object
-	# forms ({param}/{screenDivide}/{scale}) and true per-pass "input" sizing are staged;
-	# at top level the input is screen-sized so "input" == screen here.
+func _resolve_dim(d, screen_size: int, uniforms: Dictionary = {}) -> int:
+	# Subset of reference/04 §9 resolveDimension. number | "screen"/"auto"/"input" |
+	# "N%" | {screenDivide,default} | {scale,clamp} | {param,paramDefault}. True per-pass
+	# "input" sizing is staged; at top level the input is screen-sized so "input" == screen.
+	# PARITY: screenDivide uses ROUND; param/scale use FLOOR (§9). Divisor/param values come
+	# from the merged pass uniforms (e.g. zoom_chain_0).
 	if typeof(d) == TYPE_FLOAT or typeof(d) == TYPE_INT:
 		return max(1, int(d))
 	if typeof(d) == TYPE_STRING:
@@ -133,18 +161,51 @@ func _resolve_dim(d, screen_size: int) -> int:
 			return screen_size
 		if s.ends_with("%"):
 			return max(1, int(floor(screen_size * s.substr(0, s.length() - 1).to_float() / 100.0)))
+	if typeof(d) == TYPE_DICTIONARY:
+		if d.has("screenDivide"):
+			var key := str(d["screenDivide"])
+			var div = uniforms[key] if uniforms.has(key) else d.get("default", 1)
+			if div == null or float(div) == 0.0:
+				div = d.get("default", 1)
+			return max(1, int(round(screen_size / float(div))))
+		if d.has("scale"):
+			var c := int(floor(screen_size * float(d["scale"])))
+			if d.has("clamp"):
+				var cl: Dictionary = d["clamp"]
+				if cl.has("min"):
+					c = max(c, int(cl["min"]))
+				if cl.has("max"):
+					c = min(c, int(cl["max"]))
+			return max(1, c)
+		if d.has("param"):
+			var pk := str(d["param"])
+			var val = uniforms[pk] if uniforms.has(pk) else d.get("paramDefault", 64)
+			return max(1, int(floor(float(val))))
 	return screen_size
 
 func allocate_textures(graph: Dictionary) -> void:
+	_surfaces.clear()
+	_frame_read.clear()
+	_frame_write.clear()
+	_pingpong.clear()
+	var merged := _merge_uniforms(graph)
+	var pp := _pingpong_surfaces(graph)
 	var texs: Dictionary = graph.get("textures", {})
 	for tex_id in texs:
 		var spec: Dictionary = texs[tex_id]
-		var w := _resolve_dim(spec.get("width", "screen"), screen.x)
-		var h := _resolve_dim(spec.get("height", "screen"), screen.y)
-		_textures[tex_id] = _make_tex(w, h, _data_format(str(spec.get("format", "rgba16f"))))
+		var w := _resolve_dim(spec.get("width", "screen"), screen.x, merged)
+		var h := _resolve_dim(spec.get("height", "screen"), screen.y, merged)
+		var fmt := _data_format(str(spec.get("format", "rgba16f")))
+		if pp.has(tex_id):
+			_alloc_pingpong(tex_id, w, h, fmt)
+		else:
+			_textures[tex_id] = _make_tex(w, h, fmt)
 	var rs = graph.get("renderSurface", null)
 	if rs != null:
 		render_surface_tex = "global_" + str(rs)
+	# Any output/input texId not declared in graph.textures (e.g. global_o0, pooled
+	# transients) gets a screen-sized rgba16f flat texture. Ping-pong surfaces are already
+	# allocated above; _ensure_tex skips them.
 	for p in graph.get("passes", []):
 		for k in p.get("outputs", {}):
 			_ensure_tex(str(p["outputs"][k]))
@@ -153,7 +214,48 @@ func allocate_textures(graph: Dictionary) -> void:
 			if t != "none":
 				_ensure_tex(t)
 
+# A global_<name> surface that is BOTH read (a pass input) and written (a pass output)
+# is double-buffered. Write-only globals (o0 / the present target) stay flat.
+func _pingpong_surfaces(graph: Dictionary) -> Dictionary:
+	var reads := {}
+	var writes := {}
+	for p in graph.get("passes", []):
+		for k in p.get("inputs", {}):
+			var t := str(p["inputs"][k])
+			if t != "none" and t.begins_with("global_"):
+				reads[t] = true
+		for k in p.get("outputs", {}):
+			var t := str(p["outputs"][k])
+			if t.begins_with("global_"):
+				writes[t] = true
+	var out := {}
+	for t in reads:
+		if writes.has(t):
+			out[t] = true
+	return out
+
+func _alloc_pingpong(tex_id: String, w: int, h: int, fmt: int) -> void:
+	var read_key := tex_id + "_read"
+	var write_key := tex_id + "_write"
+	_textures[read_key] = _make_tex(w, h, fmt)
+	_textures[write_key] = _make_tex(w, h, fmt)
+	var bare := tex_id.substr("global_".length())
+	_surfaces[bare] = {"read": read_key, "write": write_key}
+	_pingpong[tex_id] = bare
+
+# Merge every pass.uniforms (last write wins) — the divisor/param source for sub-resolution
+# texture sizing (reference collectDefaultUniforms, §9).
+func _merge_uniforms(graph: Dictionary) -> Dictionary:
+	var out := {}
+	for p in graph.get("passes", []):
+		var u: Dictionary = p.get("uniforms", {})
+		for k in u:
+			out[k] = u[k]
+	return out
+
 func _ensure_tex(tex_id: String) -> void:
+	if _pingpong.has(tex_id):
+		return
 	if not _textures.has(tex_id):
 		_textures[tex_id] = _make_tex(screen.x, screen.y, _data_format("rgba16f"))
 
@@ -368,9 +470,29 @@ func _pack_pass(p: Dictionary) -> PackedByteArray:
 	var fn := str(p.get("func"))
 	var def := _load_effect_def(ns, fn)
 	var globals: Dictionary = def.get("globals", {})
-	if def.has("uniformLayout"):
-		return pack_with_layout(def["uniformLayout"], globals, p)
+	# A DECLARED layout (uniformLayout, or uniformLayouts[prog]) is used verbatim even when
+	# it is empty {} — that means "the .glsl declares its own UBO with no mapped params"
+	# (e.g. filter/invert). Only effects with NO layout declaration get a synthesized one.
+	if _has_layout(def, p):
+		return pack_with_layout(_layout_for(def, p), globals, p)
 	return pack_with_layout(_synth_layout(ns, fn, globals), globals, p)
+
+# Whether the effect DECLARES a uniform layout for this pass: a single `uniformLayout`
+# (any value, including empty {}), or a per-program `uniformLayouts[progName]` (multi-
+# program effects like cellularAutomata's ca/caFb). Drives both the synth-header decision
+# and packing. An empty {} still counts as declared — do NOT confuse "empty" with "absent".
+func _has_layout(def: Dictionary, p: Dictionary) -> bool:
+	if def.has("uniformLayout"):
+		return true
+	if def.has("uniformLayouts"):
+		return def["uniformLayouts"].has(str(p.get("progName", p.get("func"))))
+	return false
+
+# The declared layout dict for a pass (only meaningful when _has_layout is true).
+func _layout_for(def: Dictionary, p: Dictionary) -> Dictionary:
+	if def.has("uniformLayouts"):
+		return def["uniformLayouts"].get(str(p.get("progName", p.get("func"))), {})
+	return def.get("uniformLayout", {})
 
 # --- execution ------------------------------------------------------------
 
@@ -394,7 +516,10 @@ func execute_pass(p: Dictionary) -> void:
 			# Defines are compile-time integer enums; emit as ints (Godot JSON parses
 			# them as floats, which would otherwise inject `10.0`).
 			inject += "#define %s %d\n" % [k, int(defs[k])]
-		if not def.has("uniformLayout"):
+		# Synthesize + inject the UBO only for true no-layout effects. Effects that DECLARE
+		# a layout (uniformLayout — even empty {} — or uniformLayouts[prog]) declare their
+		# own Params block in the .glsl; injecting one too would duplicate it.
+		if not _has_layout(def, p):
 			inject += _synth_header(_synth_layout(ns, fn, def.get("globals", {})))
 		cache_key = ns + "/" + prog + _defines_key(defs)
 		frag_src = _inject_after_version(_load_fragment(ns, prog), inject)
@@ -407,10 +532,13 @@ func execute_pass(p: Dictionary) -> void:
 	for k in outputs:
 		out_tex_id = str(outputs[k])
 		break
-	if not _textures.has(out_tex_id):
+	# Double-buffered surfaces render into the current WRITE buffer; everything else
+	# into its flat texture.
+	var out_rid := _resolve_write(out_tex_id)
+	if not out_rid.is_valid():
 		push_error("pass output texture missing: " + out_tex_id)
 		return
-	var fb := rd.framebuffer_create([_textures[out_tex_id]])
+	var fb := rd.framebuffer_create([out_rid])
 	var fb_format := rd.framebuffer_get_format(fb)
 	var pipeline := _get_pipeline(cache_key, shader, fb_format)
 
@@ -421,7 +549,7 @@ func execute_pass(p: Dictionary) -> void:
 		su.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 		su.binding = 0
 		su.add_id(_sampler)
-		su.add_id(_textures[src_id])
+		su.add_id(_resolve_read(src_id))
 		set0_uniforms.append(su)
 	else:
 		var ubytes := _pack_pass(p)
@@ -431,18 +559,19 @@ func execute_pass(p: Dictionary) -> void:
 		u0.binding = 0
 		u0.add_id(ubo)
 		set0_uniforms.append(u0)
-		var bi := 1
-		for sampler_name in p.get("inputs", {}):
-			var tid := str(p["inputs"][sampler_name])
-			if tid == "none":
-				continue
+		# Bind set-0 samplers BY NAME to the shader's declared bindings. A pass may list
+		# more inputs than the shader uses (e.g. cellularAutomata's render pass lists 4,
+		# uses 1); the SPIR-V compiler strips the unused ones, so we bind exactly the
+		# declared+surviving samplers. "none"/missing inputs resolve to the black texture.
+		var inputs: Dictionary = p.get("inputs", {})
+		for s in _samplers_for(cache_key, frag_src):
+			var tid := str(inputs.get(s["name"], "none"))
 			var u := RDUniform.new()
 			u.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-			u.binding = bi
+			u.binding = int(s["binding"])
 			u.add_id(_sampler)
-			u.add_id(_textures[tid])
+			u.add_id(_resolve_read(tid))
 			set0_uniforms.append(u)
-			bi += 1
 	var set0 := rd.uniform_set_create(set0_uniforms, shader, 0)
 
 	var dl := rd.draw_list_begin(fb, RenderingDevice.DRAW_CLEAR_COLOR_ALL,
@@ -453,11 +582,43 @@ func execute_pass(p: Dictionary) -> void:
 	rd.draw_list_draw(dl, false, 1)
 	rd.draw_list_end()
 
+# --- ping-pong resolution -------------------------------------------------
+
+# Texture an input texId samples FROM. Double-buffered surfaces resolve to this frame's
+# read buffer; "none"/unknown resolve to the black texture (reference BlackTex).
+func _resolve_read(tex_id: String) -> RID:
+	if tex_id == "none" or tex_id == "":
+		return _black_tex
+	if _pingpong.has(tex_id):
+		return _textures[_frame_read[_pingpong[tex_id]]]
+	if _textures.has(tex_id):
+		return _textures[tex_id]
+	return _black_tex
+
+# Texture an output texId renders INTO. Double-buffered surfaces resolve to this frame's
+# write buffer. Returns an invalid RID if the target is genuinely missing.
+func _resolve_write(tex_id: String) -> RID:
+	if _pingpong.has(tex_id):
+		return _textures[_frame_write[_pingpong[tex_id]]]
+	if _textures.has(tex_id):
+		return _textures[tex_id]
+	return RID()
+
+# Declared set-0 samplers for an assembled shader, parsed once and cached by cache_key.
+func _samplers_for(cache_key: String, frag_src: String) -> Array:
+	if _samplers.has(cache_key):
+		return _samplers[cache_key]
+	var out := []
+	for m in _sampler_re.search_all(frag_src):
+		out.append({"name": m.get_string(2), "binding": int(m.get_string(1))})
+	_samplers[cache_key] = out
+	return out
+
 # True if any pass reads a texId at or before the pass that first writes it — the read
 # depends on a prior frame's content (feedback/state). Such graphs need a multi-frame
-# settle. (Same-surface read+write in ONE pass also trips this; those additionally need
-# ping-pong double-buffering — staged. Separate read/write passes, e.g. feedback's
-# selfTex, work with persistent textures + the frame loop alone.)
+# settle. (Same-surface read+write in ONE pass also trips this; those are now double-
+# buffered — see _pingpong_surfaces / the frame swap hooks below. Separate read/write
+# passes, e.g. feedback's selfTex, work with persistent textures + the frame loop alone.)
 func _has_feedback(graph: Dictionary) -> bool:
 	var passes = graph.get("passes", [])
 	var first_write := {}
@@ -476,15 +637,72 @@ func _has_feedback(graph: Dictionary) -> bool:
 func render(graph: Dictionary, normalized_time: float = 0.25) -> void:
 	_time = normalized_time
 	allocate_textures(graph)
-	# Feedback/state graphs read a surface before it's (re)written this frame, so they need
-	# the reference's settle count (8 frames at the pinned time). Non-feedback graphs are
-	# deterministic per frame -> a single pass.
-	var frames := 8 if _has_feedback(graph) else 1
+	# Feedback/state graphs (read-before-write, or any double-buffered surface) need the
+	# reference's settle count (8 frames at the pinned time, reference/04 §10). Otherwise a
+	# single deterministic pass.
+	var frames := 8 if (_has_feedback(graph) or not _pingpong.is_empty()) else 1
 	for _frame in frames:
+		_begin_frame()
 		for p in graph.get("passes", []):
 			execute_pass(p)
+			_update_frame_bindings(p)
+		_end_frame()
 	rd.submit()
 	rd.sync()
+
+# reference/04 §10 step 4 / BeginFrame: seed each surface's read/write bindings from its
+# record at the start of the frame.
+func _begin_frame() -> void:
+	for bare in _surfaces:
+		_frame_read[bare] = _surfaces[bare]["read"]
+		_frame_write[bare] = _surfaces[bare]["write"]
+
+# Within-frame ping-pong (reference §10.2): after a pass writes a double-buffered surface,
+# subsequent reads see the just-written buffer and the next write targets the old read
+# buffer. Keyed on outputs only.
+func _update_frame_bindings(p: Dictionary) -> void:
+	for k in p.get("outputs", {}):
+		var t := str(p["outputs"][k])
+		if not _pingpong.has(t):
+			continue
+		var bare: String = _pingpong[t]
+		if not _frame_write.has(bare):
+			continue
+		var write_id = _frame_write[bare]
+		var cur_read = _frame_read.get(bare, null)
+		_frame_read[bare] = write_id
+		if cur_read != null:
+			_frame_write[bare] = cur_read
+
+# End-of-frame swap (reference §10.7): state surfaces persist their final frame bindings
+# (the sim continues from the latest buffers — NO toggle); display surfaces toggle
+# read<->write. (Per-iteration swap for repeat>1 passes is staged — no current program
+# uses repeat.)
+func _end_frame() -> void:
+	for bare in _surfaces:
+		var rec: Dictionary = _surfaces[bare]
+		if _is_state_surface(bare):
+			if _frame_read.has(bare) and _frame_write.has(bare):
+				rec["read"] = _frame_read[bare]
+				rec["write"] = _frame_write[bare]
+		else:
+			var tmp = rec["read"]
+			rec["read"] = rec["write"]
+			rec["write"] = tmp
+
+# reference §10.7 isStateSurface (case-sensitive): exact/suffix xyz|vel|rgba|trail, the
+# substring state/State, or ^(xyz|vel|rgba|points_trail)_node_\d+$. State surfaces persist
+# across frames (sims/particles); display surfaces double-buffer with a per-frame toggle.
+func _is_state_surface(name: String) -> bool:
+	if name == "":
+		return false
+	if name == "xyz" or name == "vel" or name == "rgba" or name == "trail":
+		return true
+	if name.ends_with("_xyz") or name.ends_with("_vel") or name.ends_with("_rgba") or name.ends_with("_trail"):
+		return true
+	if name.find("state") >= 0 or name.find("State") >= 0:
+		return true
+	return _state_node_re.search(name) != null
 
 func save_surface_png(path: String) -> bool:
 	if not _textures.has(render_surface_tex):
