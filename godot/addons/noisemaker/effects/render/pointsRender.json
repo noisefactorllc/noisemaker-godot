@@ -89,6 +89,31 @@
       "max": 1
     }
   },
+  "uniformLayouts": {
+    "diffuse": {
+      "resolution": {"slot": 0, "components": "xy"},
+      "intensity": {"slot": 0, "components": "z"}
+    },
+    "copy": {
+      "resolution": {"slot": 0, "components": "xy"}
+    },
+    "deposit": {
+      "resolution": {"slot": 0, "components": "xy"},
+      "density": {"slot": 0, "components": "z"},
+      "viewMode": {"slot": 0, "components": "w"},
+      "rotateX": {"slot": 1, "components": "x"},
+      "rotateY": {"slot": 1, "components": "y"},
+      "rotateZ": {"slot": 1, "components": "z"},
+      "viewScale": {"slot": 1, "components": "w"},
+      "posX": {"slot": 2, "components": "x"},
+      "posY": {"slot": 2, "components": "y"}
+    },
+    "blend": {
+      "resolution": {"slot": 0, "components": "xy"},
+      "inputIntensity": {"slot": 0, "components": "z"},
+      "matteOpacity": {"slot": 0, "components": "w"}
+    }
+  },
   "passes": [
     {
       "name": "diffuse",

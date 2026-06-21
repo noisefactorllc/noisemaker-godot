@@ -59,9 +59,11 @@ var screen: Vector2i
 var _sampler: RID
 var _vfmt: int
 var _varr: RID
+var _vfmt_empty: int        # empty vertex format for procedural (gl_VertexIndex-only) point/billboard draws
 var _shaders := {}
 var _pipelines := {}
 var _textures := {}
+var _tex_dims := {}         # texId -> Vector2i(w,h); count:"input" deposit draws derive agent count = w*h
 var _effect_defs := {}
 var _synth_cache := {}      # "ns/fn" -> synthesized layout
 var render_surface_tex := ""
@@ -125,6 +127,11 @@ func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> vo
 	attr.offset = 0
 	_vfmt = rd.vertex_format_create([attr])
 	_varr = rd.vertex_array_create(3, _vfmt, [vbuf])
+	# No-vertex-input format: agent deposit passes draw N procedural vertices (gl_VertexIndex
+	# indexes the agent state textures) with NO vertex buffer. A pipeline built with
+	# INVALID_FORMAT_ID does not expect a bound vertex array — see execute_pass points path.
+	# (An empty vertex_format_create([]) still makes the pipeline demand a vertex array.)
+	_vfmt_empty = RenderingDevice.INVALID_FORMAT_ID
 
 # --- textures -------------------------------------------------------------
 
@@ -193,6 +200,7 @@ func allocate_textures(graph: Dictionary) -> void:
 	_frame_read.clear()
 	_frame_write.clear()
 	_pingpong.clear()
+	_tex_dims.clear()
 	var merged := _merge_uniforms(graph)
 	var pp := _pingpong_surfaces(graph)
 	var texs: Dictionary = graph.get("textures", {})
@@ -201,6 +209,7 @@ func allocate_textures(graph: Dictionary) -> void:
 		var w := _resolve_dim(spec.get("width", "screen"), screen.x, merged)
 		var h := _resolve_dim(spec.get("height", "screen"), screen.y, merged)
 		var fmt := _data_format(str(spec.get("format", "rgba16f")))
+		_tex_dims[tex_id] = Vector2i(w, h)
 		if pp.has(tex_id):
 			_alloc_pingpong(tex_id, w, h, fmt)
 		else:
@@ -280,6 +289,7 @@ func _ensure_tex(tex_id: String) -> void:
 		return
 	if not _textures.has(tex_id):
 		_textures[tex_id] = _make_tex(screen.x, screen.y, _data_format("rgba16f"))
+		_tex_dims[tex_id] = screen
 
 # --- shader assembly ------------------------------------------------------
 
@@ -337,11 +347,11 @@ func _load_fragment(ns: String, fn: String, prog: String) -> String:
 	f.close()
 	return _resolve_includes(s)
 
-func _get_shader(cache_key: String, frag_src: String) -> RID:
+func _get_shader(cache_key: String, vert_src: String, frag_src: String) -> RID:
 	if _shaders.has(cache_key):
 		return _shaders[cache_key]
 	var src := RDShaderSource.new()
-	src.source_vertex = FULLSCREEN_VS
+	src.source_vertex = vert_src
 	src.source_fragment = frag_src
 	var spirv := rd.shader_compile_spirv_from_source(src)
 	for stage in [RenderingDevice.SHADER_STAGE_VERTEX, RenderingDevice.SHADER_STAGE_FRAGMENT]:
@@ -353,17 +363,60 @@ func _get_shader(cache_key: String, frag_src: String) -> RID:
 	_shaders[cache_key] = sh
 	return sh
 
-func _get_pipeline(cache_key: String, shader: RID, fb_format: int) -> RID:
-	var key := cache_key + ":" + str(fb_format)
+func _get_pipeline(cache_key: String, shader: RID, fb_format: int, n_attach: int,
+		primitive: int, additive: bool, vfmt: int) -> RID:
+	var key := "%s:%d:%d:%d:%s" % [cache_key, fb_format, n_attach, primitive, "add" if additive else "rep"]
 	if _pipelines.has(key):
 		return _pipelines[key]
 	var blend := RDPipelineColorBlendState.new()
-	blend.attachments.push_back(RDPipelineColorBlendStateAttachment.new())
-	var p := rd.render_pipeline_create(shader, fb_format, _vfmt,
-		RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(),
+	for _i in n_attach:
+		var a := RDPipelineColorBlendStateAttachment.new()
+		if additive:
+			# Additive ONE,ONE accumulation for agent deposit passes (HDR trail). The
+			# reference notes Babylon's ALPHA_ADD (SRC_ALPHA,ONE) crushes accumulation —
+			# it must be straight ONE,ONE on both color and alpha.
+			a.enable_blend = true
+			a.src_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+			a.dst_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+			a.color_blend_op = RenderingDevice.BLEND_OP_ADD
+			a.src_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+			a.dst_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+			a.alpha_blend_op = RenderingDevice.BLEND_OP_ADD
+		blend.attachments.push_back(a)
+	var p := rd.render_pipeline_create(shader, fb_format, vfmt,
+		primitive, RDPipelineRasterizationState.new(),
 		RDPipelineMultisampleState.new(), RDPipelineDepthStencilState.new(), blend)
 	_pipelines[key] = p
 	return p
+
+# Vertex shader for a custom-draw program (agent deposit): effects/<ns>/<func>/<prog>.vert.glsl.
+func _load_vertex(ns: String, fn: String, prog: String) -> String:
+	var path := addon_dir + "/shaders/effects/%s/%s/%s.vert.glsl" % [ns, fn, prog]
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		push_error("missing vertex shader: " + path)
+		return ""
+	var s := f.get_as_text()
+	f.close()
+	return _resolve_includes(s)
+
+# Draw-vertex count for an agent deposit pass. count:number is literal; count:"input"/"auto"/
+# "screen" derives the agent count from the state input texture (stateSize²). Billboards expand
+# ×6 (two tris/quad) at the call site.
+func _resolve_count(p: Dictionary) -> int:
+	var c = p.get("count", 1)
+	if typeof(c) == TYPE_STRING:
+		var inputs: Dictionary = p.get("inputs", {})
+		var src_id := str(inputs.get("xyzTex", ""))
+		if src_id == "" or src_id == "none":
+			for k in inputs:
+				var t := str(inputs[k])
+				if t != "none" and t != "":
+					src_id = t
+					break
+		var d: Vector2i = _tex_dims.get(src_id, Vector2i(0, 0))
+		return d.x * d.y
+	return max(0, int(c))
 
 # --- effect definitions + uniform packing ---------------------------------
 
@@ -524,10 +577,22 @@ func _layout_for(def: Dictionary, p: Dictionary) -> Dictionary:
 
 # --- execution ------------------------------------------------------------
 
+# A pass is one of four draws, dispatched on outputs + drawMode:
+#   fullscreen  — 1 output, fullscreen triangle (the 93 isolation effects + blit)
+#   MRT         — N outputs (drawBuffers>1), fullscreen triangle into N attachments
+#                 (agent state updates: pointsEmit/init, flow/agent write xyz+vel+rgba)
+#   points      — drawMode "points": N procedural point primitives, one per agent, custom
+#                 vertex shader fetching agent position from the state textures (deposit)
+#   billboards  — drawMode "billboards": N×6 procedural triangles (agent quads)
+# points/billboards use ONE,ONE additive blend (blend:true) and do NOT clear — they
+# accumulate onto the trail the copy pass just produced (reference deposit semantics).
 func execute_pass(p: Dictionary) -> void:
 	var ptype := str(p.get("passType", "effect"))
+	var draw_mode := str(p.get("drawMode", ""))
+	var is_points := draw_mode == "points" or draw_mode == "billboards"
 	var cache_key := ""
 	var frag_src := ""
+	var vert_src := FULLSCREEN_VS
 	if ptype == "blit":
 		cache_key = "blit"
 		frag_src = BLIT_FS
@@ -551,24 +616,34 @@ func execute_pass(p: Dictionary) -> void:
 			inject += _synth_header(_synth_layout(ns, fn, def.get("globals", {})))
 		cache_key = ns + "/" + fn + "/" + prog + _defines_key(defs)
 		frag_src = _inject_after_version(_load_fragment(ns, fn, prog), inject)
-	var shader := _get_shader(cache_key, frag_src)
+		# Agent deposit passes carry a custom vertex stage (gl_VertexIndex scatter); the
+		# same UBO/defines are injected into it so the VS can read params + sample state.
+		if is_points:
+			vert_src = _inject_after_version(_load_vertex(ns, fn, prog), inject)
+	var shader := _get_shader(cache_key, vert_src, frag_src)
 	if not shader.is_valid():
 		return
 
+	# Resolve every output to its write RID, in declaration order (= shader layout(location=i)).
+	# Double-buffered surfaces render into the current WRITE buffer; everything else flat.
 	var outputs: Dictionary = p.get("outputs", {})
-	var out_tex_id := ""
+	var out_rids := []
 	for k in outputs:
-		out_tex_id = str(outputs[k])
-		break
-	# Double-buffered surfaces render into the current WRITE buffer; everything else
-	# into its flat texture.
-	var out_rid := _resolve_write(out_tex_id)
-	if not out_rid.is_valid():
-		push_error("pass output texture missing: " + out_tex_id)
+		var rid := _resolve_write(str(outputs[k]))
+		if not rid.is_valid():
+			push_error("pass output texture missing: " + str(outputs[k]))
+			return
+		out_rids.append(rid)
+	if out_rids.is_empty():
 		return
-	var fb := rd.framebuffer_create([out_rid])
+	var fb := rd.framebuffer_create(out_rids)
 	var fb_format := rd.framebuffer_get_format(fb)
-	var pipeline := _get_pipeline(cache_key, shader, fb_format)
+	var n_attach := out_rids.size()
+	var primitive := RenderingDevice.RENDER_PRIMITIVE_POINTS if draw_mode == "points" \
+		else RenderingDevice.RENDER_PRIMITIVE_TRIANGLES
+	var additive := bool(p.get("blend", false))
+	var vfmt := _vfmt_empty if is_points else _vfmt
+	var pipeline := _get_pipeline(cache_key, shader, fb_format, n_attach, primitive, additive, vfmt)
 
 	var set0_uniforms := []
 	if ptype == "blit":
@@ -591,8 +666,9 @@ func execute_pass(p: Dictionary) -> void:
 		# more inputs than the shader uses (e.g. cellularAutomata's render pass lists 4,
 		# uses 1); the SPIR-V compiler strips the unused ones, so we bind exactly the
 		# declared+surviving samplers. "none"/missing inputs resolve to the black texture.
+		# Deposit samplers (xyzTex/rgbaTex) live in the VERTEX stage, so parse BOTH sources.
 		var inputs: Dictionary = p.get("inputs", {})
-		for s in _samplers_for(cache_key, frag_src):
+		for s in _samplers_for(cache_key, frag_src + "\n" + vert_src):
 			var tid := str(inputs.get(s["name"], "none"))
 			var u := RDUniform.new()
 			u.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
@@ -602,12 +678,28 @@ func execute_pass(p: Dictionary) -> void:
 			set0_uniforms.append(u)
 	var set0 := rd.uniform_set_create(set0_uniforms, shader, 0)
 
-	var dl := rd.draw_list_begin(fb, RenderingDevice.DRAW_CLEAR_COLOR_ALL,
-		PackedColorArray([Color(0, 0, 0, 0)]))
+	# Deposit accumulates onto the existing trail (no clear); all other passes clear their
+	# N attachments to transparent black, then a full-coverage draw overwrites every texel.
+	var dl: int
+	if is_points:
+		dl = rd.draw_list_begin(fb, 0, PackedColorArray())
+	else:
+		var clears := PackedColorArray()
+		for _i in n_attach:
+			clears.append(Color(0, 0, 0, 0))
+		dl = rd.draw_list_begin(fb, RenderingDevice.DRAW_CLEAR_COLOR_ALL, clears)
 	rd.draw_list_bind_render_pipeline(dl, pipeline)
 	rd.draw_list_bind_uniform_set(dl, set0, 0)
-	rd.draw_list_bind_vertex_array(dl, _varr)
-	rd.draw_list_draw(dl, false, 1)
+	if is_points:
+		# Procedural draw: N (or N×6) vertices, no vertex buffer — gl_VertexIndex indexes
+		# the agent state textures in the deposit vertex shader.
+		var count := _resolve_count(p)
+		if draw_mode == "billboards":
+			count *= 6
+		rd.draw_list_draw(dl, false, 1, count)
+	else:
+		rd.draw_list_bind_vertex_array(dl, _varr)
+		rd.draw_list_draw(dl, false, 1)
 	rd.draw_list_end()
 
 # --- ping-pong resolution -------------------------------------------------

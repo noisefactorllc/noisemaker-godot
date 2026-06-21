@@ -62,6 +62,21 @@
       "max": 100
     }
   },
+  "uniformLayouts": {
+    "agent": {
+      "resolution": {"slot": 0, "components": "xy"},
+      "time": {"slot": 0, "components": "z"},
+      "stride": {"slot": 0, "components": "w"},
+      "strideDeviation": {"slot": 1, "components": "x"},
+      "kink": {"slot": 1, "components": "y"},
+      "quantize": {"slot": 1, "components": "z"},
+      "inputWeight": {"slot": 1, "components": "w"},
+      "behavior": {"slot": 2, "components": "x"}
+    },
+    "passthrough": {
+      "resolution": {"slot": 0, "components": "xy"}
+    }
+  },
   "passes": [
     {
       "name": "agent",

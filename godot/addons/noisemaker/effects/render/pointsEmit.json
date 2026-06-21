@@ -57,6 +57,19 @@
       "uniform": "resetState"
     }
   },
+  "uniformLayouts": {
+    "init": {
+      "stateSize": {"slot": 0, "components": "x"},
+      "seed": {"slot": 0, "components": "y"},
+      "time": {"slot": 0, "components": "z"},
+      "attrition": {"slot": 0, "components": "w"},
+      "layoutMode": {"slot": 1, "components": "x"},
+      "resetState": {"slot": 1, "components": "y"}
+    },
+    "passthrough": {
+      "resolution": {"slot": 0, "components": "xy"}
+    }
+  },
   "passes": [
     {
       "name": "init",
