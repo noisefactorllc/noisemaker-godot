@@ -48,7 +48,9 @@ void main() {
 	float blend = clamp(inputIntensity, 0.0, 100.0) * 0.01;
 	if (blend > 0.0) {
 		vec2 inputUv = gl_FragCoord.xy / resolution;
-		vec3 inputColor = texture(inputTex, inputUv).rgb;
+		// PARITY/RANGE: clamp to [0,1] (no-op for the reference's [0,1] o0; bounds the HDR
+		// particle field this pipeline can hand the nav so the display blend can't over-bright).
+		vec3 inputColor = clamp(texture(inputTex, inputUv).rgb, 0.0, 1.0);
 		outCol = mix(outCol, inputColor, blend);
 	}
 

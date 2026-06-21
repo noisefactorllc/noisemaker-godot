@@ -40,9 +40,14 @@ void main() {
 		return;
 	}
 
-	// Density-based culling
+	// Density-based culling. PARITY (large-stateSize precision): fract(id*GR) loses float32
+	// precision at ~1M agents (step ~0.06 near 6.5e5 → ~16 buckets → ~8x over-deposit on Metal
+	// vs the golden's ANGLE). Hi/lo split keeps the products small so fract is exact.
 	float cullThreshold = density / 100.0;
-	float particleRandom = fract(float(gl_VertexIndex) * 0.618033988749895);
+	float pidf = float(gl_VertexIndex);
+	float pidHi = floor(pidf / 4096.0);
+	float pidLo = pidf - pidHi * 4096.0;
+	float particleRandom = fract(pidHi * fract(4096.0 * 0.618033988749895) + pidLo * 0.618033988749895);
 	if (particleRandom > cullThreshold) {
 		// Cull this particle by placing it off-screen
 		gl_Position = vec4(2.0, 2.0, 0.0, 1.0);

@@ -54,9 +54,16 @@ void main() {
 		return;
 	}
 
-	// Density-based culling
+	// Density-based culling. PARITY (large-stateSize precision): the reference is
+	// fract(particleID*GR); at ~1M agents the raw product exceeds float32 fractional precision
+	// (step ~0.06 near 6.5e5) so fract() quantizes into ~16 buckets and Metal passes ~8x too
+	// many agents vs the golden's ANGLE — over-depositing into an HDR over-bright trail that
+	// drives navierStokes to a white-out. Hi/lo split keeps the products small so fract is exact.
 	float cullThreshold = density / 100.0;
-	float particleRandom = fract(float(particleID) * 0.618033988749895);
+	float pidf = float(particleID);
+	float pidHi = floor(pidf / 4096.0);
+	float pidLo = pidf - pidHi * 4096.0;
+	float particleRandom = fract(pidHi * fract(4096.0 * 0.618033988749895) + pidLo * 0.618033988749895);
 	if (particleRandom > cullThreshold) {
 		gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
 		vColor = vec4(0.0);
