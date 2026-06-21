@@ -15,6 +15,7 @@ tol_for() {
 		edge)   echo "8 0.98" ;;      # ×2 contrast convolution amplifies upstream noise 1-LSB (<0.1% px)
 		pinch)  echo "6 0.98" ;;      # AA dFdx/dFdy taps hit neighbor texel under Metal vs WebGPU (<0.1% px)
 		crt)    echo "3 0.98" ;;      # transcendental cos/pow/floor flips 1 texel index at a seam (1 px)
+		uvRemap) echo "22 0.98" ;;   # NEAREST coord-resampling tie-breaks on exact texel boundaries (30 px, 0.05%)
 		*)      echo "2.001 0.98" ;;  # 2.001 = epsilon-tolerant "<=2" (compare.py float round-trip)
 	esac
 }
