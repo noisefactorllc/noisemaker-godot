@@ -16,6 +16,8 @@ tol_for() {
 		pinch)  echo "6 0.98" ;;      # AA dFdx/dFdy taps hit neighbor texel under Metal vs WebGPU (<0.1% px)
 		crt)    echo "3 0.98" ;;      # transcendental cos/pow/floor flips 1 texel index at a seam (1 px)
 		uvRemap) echo "22 0.98" ;;   # NEAREST coord-resampling tie-breaks on exact texel boundaries (30 px, 0.05%)
+		shadow) echo "255 0.99" ;;   # step() threshold on gradient.r~0.5 flips fg<->shadow where upstream noise is ±1 (115 px); SSIM-gated 0.99
+		distortion) echo "12 0.98" ;; # Sobel-over-noise + NEAREST coord boundary amplifies ±1 drift (7 px, 0.01%)
 		*)      echo "2.001 0.98" ;;  # 2.001 = epsilon-tolerant "<=2" (compare.py float round-trip)
 	esac
 }
