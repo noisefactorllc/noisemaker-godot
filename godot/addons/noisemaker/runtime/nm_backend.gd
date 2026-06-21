@@ -214,24 +214,26 @@ func allocate_textures(graph: Dictionary) -> void:
 			if t != "none":
 				_ensure_tex(t)
 
-# A global_<name> surface that is BOTH read (a pass input) and written (a pass output)
-# is double-buffered. Write-only globals (o0 / the present target) stay flat.
+# A global_<name> surface needs double-buffering ONLY when a pass reads it AT OR BEFORE
+# its first write (same-pass read+write, or a prior-frame/feedback read) — i.e. there is a
+# read/write hazard. A surface written THEN read in a later pass (a forward dependency, e.g.
+# channelCombine reading global_o0 after its blit) is safe with a single flat texture and is
+# NOT double-buffered; nor are write-only globals (o0 / the present target). Mirrors the
+# _has_feedback condition, per-surface.
 func _pingpong_surfaces(graph: Dictionary) -> Dictionary:
-	var reads := {}
-	var writes := {}
-	for p in graph.get("passes", []):
-		for k in p.get("inputs", {}):
-			var t := str(p["inputs"][k])
-			if t != "none" and t.begins_with("global_"):
-				reads[t] = true
-		for k in p.get("outputs", {}):
-			var t := str(p["outputs"][k])
-			if t.begins_with("global_"):
-				writes[t] = true
+	var passes = graph.get("passes", [])
+	var first_write := {}
+	for i in passes.size():
+		for k in passes[i].get("outputs", {}):
+			var t := str(passes[i]["outputs"][k])
+			if t.begins_with("global_") and not first_write.has(t):
+				first_write[t] = i
 	var out := {}
-	for t in reads:
-		if writes.has(t):
-			out[t] = true
+	for i in passes.size():
+		for k in passes[i].get("inputs", {}):
+			var t := str(passes[i]["inputs"][k])
+			if t != "none" and t.begins_with("global_") and first_write.has(t) and i <= first_write[t]:
+				out[t] = true
 	return out
 
 func _alloc_pingpong(tex_id: String, w: int, h: int, fmt: int) -> void:
