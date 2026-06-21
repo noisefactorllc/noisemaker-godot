@@ -644,11 +644,50 @@ func render(graph: Dictionary, normalized_time: float = 0.25) -> void:
 	for _frame in frames:
 		_begin_frame()
 		for p in graph.get("passes", []):
-			execute_pass(p)
-			_update_frame_bindings(p)
+			# A pass may repeat within the frame (reference §10.5, e.g. reactionDiffusion's
+			# `repeat: "iterations"` solver). Each iteration ping-pongs so it reads the prior
+			# iteration's output (§10.6) — distinct from the within-frame and end-of-frame swaps.
+			var rc := _repeat_count(p)
+			for _iter in rc:
+				execute_pass(p)
+				_update_frame_bindings(p)
+				if rc > 1:
+					_swap_iteration_buffers(p)
 		_end_frame()
 	rd.submit()
 	rd.sync()
+
+# reference §10.5 resolveRepeatCount: no repeat -> 1; number -> max(1,floor); string ->
+# look it up in the pass uniforms (the iteration count is a pass uniform, e.g. iterations=8).
+func _repeat_count(p: Dictionary) -> int:
+	var r = p.get("repeat", null)
+	if r == null:
+		return 1
+	if typeof(r) == TYPE_FLOAT or typeof(r) == TYPE_INT:
+		return max(1, int(floor(float(r))))
+	if typeof(r) == TYPE_STRING:
+		var u: Dictionary = p.get("uniforms", {})
+		if u.has(r):
+			var v = u[r]
+			if typeof(v) == TYPE_FLOAT or typeof(v) == TYPE_INT:
+				return max(1, int(floor(float(v))))
+	return 1
+
+# reference §10.6 swapIterationBuffers: between iterations of a repeated pass, swap the
+# surface RECORD read<->write and mirror the frame maps FROM the swapped record (so the
+# next iteration reads the texel just written). Distinct from §10.2/§10.7.
+func _swap_iteration_buffers(p: Dictionary) -> void:
+	for k in p.get("outputs", {}):
+		var t := str(p["outputs"][k])
+		if not _pingpong.has(t):
+			continue
+		var bare: String = _pingpong[t]
+		var rec: Dictionary = _surfaces[bare]
+		var tmp = rec["read"]
+		rec["read"] = rec["write"]
+		rec["write"] = tmp
+		_frame_read[bare] = rec["read"]
+		_frame_write[bare] = rec["write"]
 
 # reference/04 §10 step 4 / BeginFrame: seed each surface's read/write bindings from its
 # record at the start of the frame.
