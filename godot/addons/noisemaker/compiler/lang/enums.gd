@@ -1,19 +1,21 @@
-# enums.gd — stdEnums tree + dynamic enum registry. Port of TD compiler/lang/enums.py
-# (hlsl Enums.cs / shaders/src/lang/std_enums.js + enums.js, reference/01 §8.1-§8.2).
+# enums.gd — stdEnums tree + dynamic enum registry. Port of the REFERENCE shaders/src/lang/
+# std_enums.js + enums.js (cross-checked vs noisemaker-hlsl Enums.cs). Sources: upstream
+# noisemaker + noisemaker-hlsl ONLY. Values verified against std_enums.js.
 #
 # The enum tree maps dotted member paths (e.g. ["oscKind","sine"]) to integer leaves. A SUBTREE
 # is a plain Dictionary {name: node}; a LEAF is {"type":"Number","value":int} (so a `type` key
 # distinguishes them — reference deepMerge treats any object with a `type` key as a leaf). Effect
 # `choices` layer on via register_choice; project (effect) enums take precedence over std
-# (reference/02 §2.5).
+# (the reference imports stdEnums + the merged effect-enums tree separately — see std_enums.js /
+# enums.js).
 #
 # Instance-owned by EffectRegistry. The reference uses module globals; an instance is the clean
 # GDScript adaptation — no cross-compile static state to reset.
 #
-# PARITY HAZARDS replicated:
-#   - palette enum values are POSITIONAL indices into share/palettes.json key order, 0-based,
-#     INCLUDING "none" at index 0 (reference/01 §8.1).
-#   - oscKind.noise == oscKind.noise1d == 5 (reference/01 §8.1).
+# PARITY HAZARDS replicated (from std_enums.js):
+#   - palette enum values are POSITIONAL indices into palettes.js key order, 0-based,
+#     INCLUDING "none" at index 0.
+#   - oscKind.noise == oscKind.noise1d == 5.
 extends RefCounted
 
 # share/palettes.json key order (verbatim, 0-based positional enum; "none" IS index 0; 56 entries).
@@ -41,7 +43,13 @@ static func leaf(value) -> Dictionary:
 	return {"type": "Number", "value": value}
 
 static func is_leaf(node) -> bool:
-	return node is Dictionary and node.get("type") == "Number"
+	# A leaf is {"type":"Number","value":...}. Guard the value's type before comparing — GDScript
+	# throws on Dictionary == String (unlike JS), and a subtree can legitimately hold a child named
+	# "type" (e.g. an effect whose global parameter is literally called `type`).
+	if not (node is Dictionary):
+		return false
+	var t = node.get("type")
+	return t is String and t == "Number"
 
 func std() -> Dictionary:
 	return _std
