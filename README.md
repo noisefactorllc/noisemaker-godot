@@ -8,10 +8,19 @@ the Unity/HLSL port [`../noisemaker-hlsl`](../noisemaker-hlsl) and reuses that p
 engine-agnostic "brain" verbatim (the re-implementer specs, the golden graph exporter,
 the parity comparator).
 
-> **🚧 WIP — early development.** The full render-graph executor and the 8 Tier-1
-> programs are pixel-parity on Apple Silicon (Metal). Broad effect coverage, the live
-> in-engine DSL compiler, and the chaotic/agent/3D effects are staged. Treat current
-> output as provisional.
+> **🚧 WIP — early development.** The render-graph executor and the ported effect set are
+> pixel-parity on Apple Silicon (Metal). The **agents/points capability** (MRT + procedural
+> points/billboards deposit) is built and the emergent north-star `target.dsl`
+> (particles → navierStokes → palette/lighting/lens) **renders end-to-end and stably**.
+> The live in-engine DSL compiler and the 3D effects are still staged. Treat current output
+> as provisional.
+>
+> **Known parity limit — the chaos gate.** Every effect is bit-exact to the reference
+> *except chaotic agent flows* (and the `target.dsl` that feeds one into a fluid solver):
+> those render correctly but as a *different instance* of the chaos, gated by a single
+> spec-legal ~1-ULP `pow` rounding difference in Godot's shader compiler that the chaotic
+> loop amplifies. Cause, effect, evidence, and repro are documented in
+> [docs/CHAOS-GATE.md](docs/CHAOS-GATE.md).
 
 ## Layout
 

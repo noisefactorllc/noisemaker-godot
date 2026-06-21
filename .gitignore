@@ -3,10 +3,8 @@ godot/.godot/
 godot/.import/
 *.translation
 
-# Parity artifacts (generated)
-parity/out/*.png
-parity/out/*.graph.json
-parity/out/*.report.json
+# Parity artifacts (generated golden/candidate renders, graphs, reports)
+parity/out/
 err.tmp
 
 # Node
