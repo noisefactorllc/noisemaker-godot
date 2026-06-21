@@ -49,6 +49,7 @@ var _ops: Dictionary            # "<ns>.<func>" -> {name, args}
 var _param_aliases: Dictionary  # "<ns>.<func>" -> {old:new}
 var _effect_aliases: Dictionary # "<ns>.<func>" -> replacement name
 var _starter_ops: Dictionary    # set of "<ns>.<func>" that are starters (value = true)
+var _define_map: Dictionary     # "<ns>.<func>" -> {globalKey: DEFINE_NAME} for compile-time defines
 var _loaded := false
 
 func _init() -> void:
@@ -58,6 +59,7 @@ func _init() -> void:
 	_param_aliases = {}
 	_effect_aliases = {}
 	_starter_ops = {}
+	_define_map = {}
 
 # ---------------------------------------------------------------- public lookups
 
@@ -78,6 +80,10 @@ func starter_ops() -> Dictionary:
 
 func is_starter_registered(name: String) -> bool:
 	return _starter_ops.has(name)
+
+# "<ns>.<func>" -> {globalKey: DEFINE_NAME} for compile-time-define globals (orchestrator promotion).
+func define_map() -> Dictionary:
+	return _define_map
 
 func param_aliases() -> Dictionary:
 	return _param_aliases
@@ -202,6 +208,16 @@ func _register_effect(def: Dictionary) -> void:
 	# starter set (pass-rule; ns.func only — mirrors export-graph) ---------
 	if _is_starter_def(def):
 		_starter_ops[ns + "." + fn] = true
+
+	# define-map: globals carrying `define` -> {globalKey: DEFINE_NAME} (orchestrator promotion)
+	if globals is Dictionary:
+		var defs := {}
+		for key in globals:
+			var spec = globals[key]
+			if spec is Dictionary and spec.get("define"):
+				defs[key] = spec["define"]
+		if not defs.is_empty():
+			_define_map[ns + "." + fn] = defs
 
 # An effect is a starter iff no pass consumes an upstream-surface input (export-graph rule).
 func _is_starter_def(def: Dictionary) -> bool:
