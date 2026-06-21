@@ -64,6 +64,7 @@ var _shaders := {}
 var _pipelines := {}
 var _textures := {}
 var _tex_dims := {}         # texId -> Vector2i(w,h); count:"input" deposit draws derive agent count = w*h
+var _tex_fmt := {}          # texId -> RenderingDevice DATA_FORMAT_*; lets the snapshot read the render surface in its real format (rgba8 vs rgba16f)
 var _effect_defs := {}
 var _synth_cache := {}      # "ns/fn" -> synthesized layout
 var render_surface_tex := ""
@@ -201,6 +202,7 @@ func allocate_textures(graph: Dictionary) -> void:
 	_frame_write.clear()
 	_pingpong.clear()
 	_tex_dims.clear()
+	_tex_fmt.clear()
 	var merged := _merge_uniforms(graph)
 	var pp := _pingpong_surfaces(graph)
 	var texs: Dictionary = graph.get("textures", {})
@@ -210,6 +212,7 @@ func allocate_textures(graph: Dictionary) -> void:
 		var h := _resolve_dim(spec.get("height", "screen"), screen.y, merged)
 		var fmt := _data_format(str(spec.get("format", "rgba16f")))
 		_tex_dims[tex_id] = Vector2i(w, h)
+		_tex_fmt[tex_id] = fmt
 		if pp.has(tex_id):
 			_alloc_pingpong(tex_id, w, h, fmt)
 		else:
@@ -217,9 +220,13 @@ func allocate_textures(graph: Dictionary) -> void:
 	var rs = graph.get("renderSurface", null)
 	if rs != null:
 		render_surface_tex = "global_" + str(rs)
-	# Any output/input texId not declared in graph.textures (e.g. global_o0, pooled
-	# transients) gets a screen-sized rgba16f flat texture. Ping-pong surfaces are already
-	# allocated above; _ensure_tex skips them.
+	# Any output/input texId not declared in graph.textures (e.g. global_o0/o1, the user
+	# surfaces) gets a screen-sized rgba8 flat texture — matching the reference backend's
+	# resolveFormat default (`formats[format] || formats['rgba8']`, webgl2.js:1717). This is a
+	# RANGE constraint, not just storage: undeclared user surfaces CLAMP to [0,1]. The target
+	# feeds o0 (HDR particle trail, blurred) back into navierStokes; clamping it to rgba8 like
+	# the reference keeps the fluid solve in sync (an rgba16f o0 preserved out-of-range values
+	# and diverged the chaotic sim). Ping-pong surfaces are already allocated; _ensure_tex skips.
 	for p in graph.get("passes", []):
 		for k in p.get("outputs", {}):
 			_ensure_tex(str(p["outputs"][k]))
@@ -288,8 +295,10 @@ func _ensure_tex(tex_id: String) -> void:
 	if _pingpong.has(tex_id):
 		return
 	if not _textures.has(tex_id):
-		_textures[tex_id] = _make_tex(screen.x, screen.y, _data_format("rgba16f"))
+		var f8 := _data_format("rgba8")
+		_textures[tex_id] = _make_tex(screen.x, screen.y, f8)
 		_tex_dims[tex_id] = screen
+		_tex_fmt[tex_id] = f8
 
 # --- shader assembly ------------------------------------------------------
 
@@ -899,13 +908,25 @@ func _snapshot_surface() -> Image:
 	if not _textures.has(render_surface_tex):
 		return null
 	var bytes := rd.texture_get_data(_textures[render_surface_tex], 0)
-	var src := Image.create_from_data(screen.x, screen.y, false, Image.FORMAT_RGBAH, bytes)
+	# Read the render surface in its ACTUAL format. User surfaces (o0/o1) are rgba8 like the
+	# reference; declared HDR surfaces are rgba16f. Misreading rgba8 bytes as half-float is
+	# garbage, so pick the Image format from the tracked RD format.
+	var rdfmt := int(_tex_fmt.get(render_surface_tex, _data_format("rgba16f")))
+	var img_fmt := Image.FORMAT_RGBAH
+	if rdfmt == RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM:
+		img_fmt = Image.FORMAT_RGBA8
+	elif rdfmt == RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT:
+		img_fmt = Image.FORMAT_RGBAF
+	var src := Image.create_from_data(screen.x, screen.y, false, img_fmt, bytes)
 	# Single global Y reconciliation (present point, like the Unity NMBlit flip): the
 	# webgl2/GLSL golden is bottom-left flipped to a top-down PNG; our pipeline is
 	# uniformly top-left, so the result is one vertical flip away.
 	src.flip_y()
-	# save_png on a half-float image clobbers alpha to opaque; quantize to 8-bit
-	# ourselves (round, clamp, NO sRGB), preserving alpha and matching reference round(v*255).
+	# rgba8 surfaces are already 8-bit — return directly. For half/float surfaces, save_png
+	# clobbers alpha to opaque, so quantize to 8-bit ourselves (round, clamp, NO sRGB),
+	# preserving alpha and matching the reference's round(v*255).
+	if img_fmt == Image.FORMAT_RGBA8:
+		return src
 	var out := Image.create(screen.x, screen.y, false, Image.FORMAT_RGBA8)
 	for y in screen.y:
 		for x in screen.x:
