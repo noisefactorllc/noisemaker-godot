@@ -23,7 +23,8 @@ const EXPORT = join(ROOT, 'tools/export-graph.mjs')
 // engine-builtin passes that need no per-effect shader port
 const BUILTIN = new Set(['blit', 'copy', 'passthrough'])
 
-const shaderExists = (ns, prog) => existsSync(join(SHADERS, ns, `${prog}.glsl`))
+// Shaders are func-qualified: effects/<ns>/<func>/<prog>.glsl (mirrors the reference layout).
+const shaderExists = (ns, func, prog) => existsSync(join(SHADERS, ns, func, `${prog}.glsl`))
 
 const files = readdirSync(RAW).filter(f => f.endsWith('.json')).sort()
 const tmp = mkdtempSync(join(tmpdir(), 'nmcov-'))
@@ -51,17 +52,21 @@ for (const f of files) {
     continue
   }
 
-  const need = new Map()  // "ns/prog" -> {ns, prog}
+  const need = new Map()  // "ns/func/prog" -> {ns, func, prog}
   for (const p of graph.passes || []) {
     const prog = p.progName || p.program
     const ns = p.namespace || ''
+    const func = p.func || ''
     if (!prog || BUILTIN.has(prog)) continue
-    need.set(`${ns}/${prog}`, { ns, prog })
+    need.set(`${ns}/${func}/${prog}`, { ns, func, prog })
   }
-  const missing = []
-  for (const { ns, prog } of need.values()) {
-    if (!shaderExists(ns, prog)) missing.push(`${ns}/${prog}`)
+  // Report leverage per EFFECT (ns/func) — that's the unit of porting; an effect counts as
+  // missing for a composition if ANY of its programs is unported.
+  const missingEffects = new Set()
+  for (const { ns, func, prog } of need.values()) {
+    if (!shaderExists(ns, func, prog)) missingEffects.add(`${ns}/${func}`)
   }
+  const missing = [...missingEffects]
   const seenNs = new Set()
   for (const m of missing) {
     missFreq.set(m, (missFreq.get(m) || 0) + 1)
