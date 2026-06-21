@@ -235,6 +235,21 @@ func _pingpong_surfaces(graph: Dictionary) -> Dictionary:
 				first_write[t] = i
 	var out := {}
 	for i in passes.size():
+		# (a) Same-pass IN-PLACE read+write (nsPressure Jacobi, nsAdvect): a pass that
+		# samples a global surface it ALSO writes is a read-after-write hazard needing a
+		# read/write pair, regardless of where the surface's first write lands. Missing this
+		# raced the nav pressure/velocity solves into run-to-run nondeterminism (the
+		# first-write test below only catches reads AT OR BEFORE the first write).
+		var in_set := {}
+		for k in passes[i].get("inputs", {}):
+			var t := str(passes[i]["inputs"][k])
+			if t.begins_with("global_"):
+				in_set[t] = true
+		for k in passes[i].get("outputs", {}):
+			var t := str(passes[i]["outputs"][k])
+			if in_set.has(t):
+				out[t] = true
+		# (b) Read at-or-before the surface's first write (feedback / same-pass seed hazard).
 		for k in passes[i].get("inputs", {}):
 			var t := str(passes[i]["inputs"][k])
 			if t != "none" and t.begins_with("global_") and first_write.has(t) and i <= first_write[t]:
@@ -687,6 +702,10 @@ func render_samples(graph: Dictionary, total_frames: int, sample_every: int) -> 
 				if rc > 1:
 					_swap_iteration_buffers(p)
 		_end_frame()
+		# Submit/sync each frame: keeps command buffers small (a 40-iteration nsPressure
+		# solve over hundreds of accumulated frames would otherwise overflow one buffer) and
+		# serializes frame N before N+1. Determinism comes from correct ping-pong pairs
+		# (see _pingpong_surfaces), not from batching.
 		rd.submit()
 		rd.sync()
 		if frame % sample_every == 0:
