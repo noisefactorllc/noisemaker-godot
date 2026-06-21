@@ -77,25 +77,27 @@ GODOT=/Applications/Godot.app/Contents/MacOS/Godot bash parity/run.sh noise
 
 ## Status
 
-**29 / 29 ported effects pixel-parity** on Apple M4 / Metal (28 within 1/255, SSIM ≈ 1.0;
-`newton` SSIM 0.99783 at chaotic tolerance). Run the full sweep with `bash parity/sweep.sh`.
+**71 / 71 ported effects pixel-parity** on Apple M4 / Metal (single `bash parity/sweep.sh`
+run; the large majority within 1/255, SSIM ≈ 1.0). A handful trip the strict ≤2 gate at
+0.01–0.18% of pixels — each a faithful verbatim port where cross-device fp drift is amplified
+through a discontinuity (`step`), contrast convolution (`edge`), or NEAREST coord-resampling
+boundary tie (`uvRemap`, `distortion`) — and is **SSIM-gated** with a documented per-program
+tolerance in `parity/sweep.sh`.
 
-| Namespace | Parity | Effects |
+| Namespace | Parity | Highlights |
 |---|---|---|
-| `synth` | 19 / 29 | solid, noise, cell, gradient, shape, osc2d, testPattern, pattern, perlin, bitwise, mandelbrot, julia, gabor, modPattern, curl, mandala, sacredGeometry, subdivide, newton\* |
-| `filter` | 9 / 90 | blur (blurH+blurV), emboss, posterize, bc, deriv, colorspace, invert, normalMap, pixels |
-| `mixer` | 1 / 14 | blendMode |
-| `points`/`render`/`synth3d`/`filter3d`/`classicNoisedeck` | staged | — |
+| `synth` | 19 / 29 | generators, df64 fractals (mandelbrot/julia/newton), value/simplex/cell/gabor/curl noise |
+| `filter` | 32 / 90 | color ops, convolutions, warps, multi-pass (blur, **bloom**, celShading, outline, smooth), **feedback** |
+| `mixer` | 13 / 14 | whole namespace bar `channelCombine` (3-input) |
+| `classicNoisedeck` | 7 / 20 | legacy generators (noise/fractal/caustic/moodscape/shapes/noise3d/bitEffects) |
+| `points`/`render`/`synth3d`/`filter3d` | staged | agents (MRT/scatter), 3D volumes/raymarch/meshes |
 
-\* `newton` is a chaotic Newton-fractal: ~0.19% of pixels (isolated root-basin boundary
-speckles) differ by a `df64` ULP between WebGPU and Metal FMA — the documented cross-device
-limit, gated on structural SSIM.
-
-The **8 Tier-1** programs (`solid`/`noise`/`cell`/`gradient`/`shape`/`osc2d`/`blur`/
-`blendMode`) plus the expansion set exercise the full executor: pooled intermediates,
-multi-pass (separable `blur` → `blurH`/`blurV` by `progName`), multi-input mixing,
-compile-time defines, engine globals, both the reference-`uniformLayout` and synthesized
-no-layout uniform models, and NEAREST-filtered coord-resampling (`pixels`).
+The expansion set exercises the full executor: pooled intermediates, multi-pass + multi-program
+(separable `blur` → `blurH`/`blurV`, `bloom` → 3 programs), 2–3-input mixing, compile-time
+defines, engine globals, both the reference-`uniformLayout` and synthesized no-layout uniform
+models, NEAREST-filtered coord-resampling (warps), and the **multi-frame feedback/state loop**
+(`feedback`: 8-frame settle with a persistent zero-initialized buffer, auto-detected). Only
+same-pass read+write state (cellularAutomata) still needs ping-pong double-buffering (staged).
 
 Each ported effect ships a Godot-GLSL fragment shader under
 `godot/addons/noisemaker/shaders/effects/<ns>/<prog>.glsl`; the effect-definition JSON
