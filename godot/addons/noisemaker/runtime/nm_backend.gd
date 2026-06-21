@@ -67,6 +67,11 @@ var _synth_cache := {}      # "ns/fn" -> synthesized layout
 var render_surface_tex := ""
 var _time := 0.25
 var _render_scale := 1.0
+# Timed-sampling mode (stateful-sim parity, reference 30s/5s): real per-frame deltaTime
+# and frame index, threaded into _engine_value. Both stay 0 on the default single-frame
+# path, so the 90 isolation effects render byte-identically.
+var _delta_time := 0.0
+var _frame_index := 0
 
 # Double-buffered "ping-pong" surfaces (reference/04 §6/§8/§10). A `global_<name>`
 # texId that is BOTH read and written by passes gets a physical read/write texture
@@ -423,8 +428,10 @@ func _engine_value(name: String) -> Array:
 			return [float(screen.x) / float(screen.y) if screen.y != 0 else 1.0]
 		"renderScale":
 			return [_render_scale]
-		"deltaTime", "frame":
-			return [0.0]
+		"deltaTime":
+			return [_delta_time]
+		"frame":
+			return [float(_frame_index)]
 	return [0.0]
 
 func _comp_offsets(components: String) -> Array:
@@ -659,6 +666,33 @@ func render(graph: Dictionary, normalized_time: float = 0.25) -> void:
 	rd.submit()
 	rd.sync()
 
+# Timed multi-sample render for stateful sims (reference 30s/5s sampling). Steps a real
+# per-frame deltaTime (1/600 normalized = one 60fps frame in the 10s loop) so fluid/feedback
+# sims actually EVOLVE — the single-frame render() pins deltaTime=0, freezing them at the seed.
+# Snapshots the render surface every `sample_every` frames; returns the sampled Images in order.
+func render_samples(graph: Dictionary, total_frames: int, sample_every: int) -> Array:
+	allocate_textures(graph)
+	var dt := 1.0 / 600.0
+	var samples := []
+	for frame in range(1, total_frames + 1):
+		_time = fposmod(float(frame) * dt, 1.0)
+		_delta_time = dt
+		_frame_index = frame
+		_begin_frame()
+		for p in graph.get("passes", []):
+			var rc := _repeat_count(p)
+			for _iter in rc:
+				execute_pass(p)
+				_update_frame_bindings(p)
+				if rc > 1:
+					_swap_iteration_buffers(p)
+		_end_frame()
+		rd.submit()
+		rd.sync()
+		if frame % sample_every == 0:
+			samples.append(_snapshot_surface())
+	return samples
+
 # reference §10.5 resolveRepeatCount: no repeat -> 1; number -> max(1,floor); string ->
 # look it up in the pass uniforms (the iteration count is a pass uniform, e.g. iterations=8).
 func _repeat_count(p: Dictionary) -> int:
@@ -745,10 +779,10 @@ func _is_state_surface(name: String) -> bool:
 		return true
 	return _state_node_re.search(name) != null
 
-func save_surface_png(path: String) -> bool:
+# Snapshot the current render surface to an 8-bit Image (per-sample / per-frame capture).
+func _snapshot_surface() -> Image:
 	if not _textures.has(render_surface_tex):
-		push_error("render surface missing: " + render_surface_tex)
-		return false
+		return null
 	var bytes := rd.texture_get_data(_textures[render_surface_tex], 0)
 	var src := Image.create_from_data(screen.x, screen.y, false, Image.FORMAT_RGBAH, bytes)
 	# Single global Y reconciliation (present point, like the Unity NMBlit flip): the
@@ -761,5 +795,12 @@ func save_surface_png(path: String) -> bool:
 	for y in screen.y:
 		for x in screen.x:
 			out.set_pixel(x, y, src.get_pixel(x, y))
-	out.save_png(path)
+	return out
+
+func save_surface_png(path: String) -> bool:
+	var img := _snapshot_surface()
+	if img == null:
+		push_error("render surface missing: " + render_surface_tex)
+		return false
+	img.save_png(path)
 	return true

@@ -12,6 +12,8 @@ func _init() -> void:
 	var graph_path := ""
 	var out_path := ""
 	var size := 256
+	var run_seconds := 0       # >0 => timed-sampling mode for stateful sims
+	var sample_every_sec := 5
 	var i := 0
 	while i < a.size():
 		match a[i]:
@@ -21,10 +23,14 @@ func _init() -> void:
 				out_path = a[i + 1]; i += 2
 			"--size":
 				size = int(a[i + 1]); i += 2
+			"--run-seconds":
+				run_seconds = int(a[i + 1]); i += 2
+			"--sample-every":
+				sample_every_sec = int(a[i + 1]); i += 2
 			_:
 				i += 1
 	if graph_path == "" or out_path == "":
-		printerr("usage: -- --graph <json> --out <png> [--size 256]")
+		printerr("usage: -- --graph <json> --out <png> [--size 256] [--run-seconds N --sample-every S]")
 		quit(1); return
 
 	var rd := RenderingServer.create_local_rendering_device()
@@ -45,6 +51,23 @@ func _init() -> void:
 	var Backend = preload("res://addons/noisemaker/runtime/nm_backend.gd")
 	var backend = Backend.new()
 	backend.setup(rd, "res://addons/noisemaker", Vector2i(size, size))
+	if run_seconds > 0:
+		# Timed-sampling mode (stateful sims): run run_seconds of sim-time at 60fps, capturing
+		# every sample_every_sec into <out-basename>.t<sec>.png (e.g. navierStokes.candidate.t5.png).
+		var total_frames := run_seconds * 60
+		var every := max(1, sample_every_sec * 60)
+		var imgs = backend.render_samples(graph, total_frames, every)
+		var base := out_path.get_basename()
+		var all_ok := imgs.size() > 0
+		for idx in imgs.size():
+			var sec := (idx + 1) * sample_every_sec
+			var sp := "%s.t%d.png" % [base, sec]
+			var simg = imgs[idx]
+			var sok: bool = simg != null and simg.save_png(sp) == OK
+			all_ok = all_ok and sok
+			print("NM_SAMPLE t=", sec, " out=", sp, " ok=", sok)
+		print("NM_RENDERED_SAMPLES n=", imgs.size(), " surface=", backend.render_surface_tex)
+		quit(0 if all_ok else 1); return
 	backend.render(graph)
 	var ok = backend.save_surface_png(out_path)
 	print("NM_RENDERED out=", out_path, " surface=", backend.render_surface_tex, " ok=", ok)
