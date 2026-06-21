@@ -22,6 +22,8 @@ tol_for() {
 		distortion) echo "12 0.98" ;; # Sobel-over-noise + NEAREST coord boundary amplifies ±1 drift (7 px, 0.01%)
 		spiral) echo "8 0.99" ;;     # AA dFdx/dFdy sub-texel taps over a steep atan/spiral warp round to neighbor texels under Metal vs WebGL2 (10 px, 0.015%); core warp bit-exact
 		bulge) echo "5 0.99" ;;      # AA dFdx/dFdy taps at the mirror-wrap UV discontinuity diverge GL vs Vulkan (3 px, 0.0046%); core bulge bit-exact
+		degauss) echo "5 0.99" ;;    # cos/sin->floor/fract displacement at image-edge wrap rounds to neighbor texels Metal vs WebGL2 (3 px, 0.0046%)
+		refract) echo "5 0.99" ;;    # refraction UV lands on a texel boundary, NEAREST picks a neighbor (1 px, 0.0015%); core refract bit-exact
 		*)      echo "2.001 0.98" ;;  # 2.001 = epsilon-tolerant "<=2" (compare.py float round-trip)
 	esac
 }
