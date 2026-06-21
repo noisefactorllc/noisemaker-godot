@@ -37,11 +37,18 @@ const Enums := preload("res://addons/noisemaker/compiler/lang/enums.gd")
 
 const EFFECTS_DIR := "res://addons/noisemaker/effects"
 
+# An effect is a STARTER (valid as a chain root, needs no pipeline input) iff none of its passes
+# consumes one of these upstream-surface inputs. This mirrors tools/export-graph.mjs — the rule the
+# real graph-producing path uses, NOT the per-effect `starter` flag (e.g. mixer.channelCombine has
+# starter:false but takes its inputs via surface kwargs, so it IS a starter and renders).
+const _STARTER_INPUT_SENTINELS := ["inputTex", "inputTex3d", "src", "o0", "o1"]
+
 var enums: Enums
 var _effects: Dictionary        # lookup key -> effect def (Dictionary)
 var _ops: Dictionary            # "<ns>.<func>" -> {name, args}
 var _param_aliases: Dictionary  # "<ns>.<func>" -> {old:new}
 var _effect_aliases: Dictionary # "<ns>.<func>" -> replacement name
+var _starter_ops: Dictionary    # set of "<ns>.<func>" that are starters (value = true)
 var _loaded := false
 
 func _init() -> void:
@@ -50,6 +57,7 @@ func _init() -> void:
 	_ops = {}
 	_param_aliases = {}
 	_effect_aliases = {}
+	_starter_ops = {}
 
 # ---------------------------------------------------------------- public lookups
 
@@ -63,6 +71,13 @@ func get_op(name: String):
 
 func ops_table() -> Dictionary:
 	return _ops
+
+# Set of registered starter ops ("<ns>.<func>" -> true). The validator's isStarterOp consults this.
+func starter_ops() -> Dictionary:
+	return _starter_ops
+
+func is_starter_registered(name: String) -> bool:
+	return _starter_ops.has(name)
 
 func param_aliases() -> Dictionary:
 	return _param_aliases
@@ -183,6 +198,22 @@ func _register_effect(def: Dictionary) -> void:
 	# effect aliases (deprecation: hidden + deprecatedBy) ------------------
 	if def.get("hidden") and def.has("deprecatedBy"):
 		_effect_aliases[ns + "." + fn] = def["deprecatedBy"]
+
+	# starter set (pass-rule; ns.func only — mirrors export-graph) ---------
+	if _is_starter_def(def):
+		_starter_ops[ns + "." + fn] = true
+
+# An effect is a starter iff no pass consumes an upstream-surface input (export-graph rule).
+func _is_starter_def(def: Dictionary) -> bool:
+	var passes = def.get("passes", [])
+	if not (passes is Array):
+		return true
+	for p in passes:
+		if p is Dictionary and p.get("inputs") is Dictionary:
+			for v in p["inputs"].values():
+				if _STARTER_INPUT_SENTINELS.has(v):
+					return false
+	return true
 
 # ---------------------------------------------- renderer/canvas.js sanitizeEnumName (verbatim port)
 

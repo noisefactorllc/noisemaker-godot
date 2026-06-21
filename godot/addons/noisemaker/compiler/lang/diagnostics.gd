@@ -1,14 +1,16 @@
-# diagnostics.gd — diagnostic codes + the collected-diagnostic record. Port of TD
-# compiler/lang/diagnostics.py (hlsl Diagnostics.cs, reference/02 §7).
+# diagnostics.gd — diagnostic codes + default messages. Port of the REFERENCE
+# shaders/src/lang/diagnostics.js (cross-checked vs noisemaker-hlsl Diagnostics.cs). Sources:
+# upstream noisemaker + noisemaker-hlsl ONLY.
 #
-# The validator COLLECTS diagnostics (it does not throw, except missing-search). Codes +
-# severities are the contract (severity strings 'error'/'warning' match the reference output).
+# The validator COLLECTS diagnostics (it does not throw, except missing-search) and builds each
+# record itself (shape {code, message, severity, [location], [identifier]} — see validator.gd). This
+# module supplies the code -> [default message, severity] table the validator looks up.
 extends RefCounted
 
 const SEVERITY_ERROR := "error"
 const SEVERITY_WARNING := "warning"
 
-# code -> [default message, severity]. reference/02 §7 / reference/01 §8.7.
+# code -> [default message, severity] (verbatim from diagnostics.js).
 const _TABLE := {
 	"S001": ["Unknown identifier", "error"],
 	"S002": ["Argument out of range", "warning"],
