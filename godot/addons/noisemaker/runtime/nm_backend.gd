@@ -323,8 +323,12 @@ func _defines_key(defines: Dictionary) -> String:
 		s += "__%s_%s" % [k, str(defines[k])]
 	return s
 
-func _load_fragment(ns: String, fn: String) -> String:
-	var path := addon_dir + "/shaders/effects/%s/%s.glsl" % [ns, fn]
+func _load_fragment(ns: String, fn: String, prog: String) -> String:
+	# Shaders live func-qualified at effects/<ns>/<func>/<prog>.glsl, mirroring the
+	# reference <ns>/<func>/glsl/<prog> layout. This disambiguates funcs that share a
+	# namespace + progName but have different shaders (pointsRender vs pointsBillboardRender:
+	# both render/deposit, render/diffuse, render/blend — distinct programs).
+	var path := addon_dir + "/shaders/effects/%s/%s/%s.glsl" % [ns, fn, prog]
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		push_error("missing shader: " + path)
@@ -545,8 +549,8 @@ func execute_pass(p: Dictionary) -> void:
 		# own Params block in the .glsl; injecting one too would duplicate it.
 		if not _has_layout(def, p):
 			inject += _synth_header(_synth_layout(ns, fn, def.get("globals", {})))
-		cache_key = ns + "/" + prog + _defines_key(defs)
-		frag_src = _inject_after_version(_load_fragment(ns, prog), inject)
+		cache_key = ns + "/" + fn + "/" + prog + _defines_key(defs)
+		frag_src = _inject_after_version(_load_fragment(ns, fn, prog), inject)
 	var shader := _get_shader(cache_key, frag_src)
 	if not shader.is_valid():
 		return
