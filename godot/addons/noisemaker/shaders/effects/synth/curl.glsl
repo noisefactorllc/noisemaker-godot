@@ -46,8 +46,11 @@ float simplex3D(vec3 v) {
 	vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
 	vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
 
-	// Apply seed offset to input
-	vec3 vSeeded = v + float(u_seed) * 0.0001;
+	// Apply seed offset to input. The reference's two backends DISAGREE on this
+	// constant — wgsl/curl.wgsl uses 0.0001 but glsl/curl.glsl uses 0.1271 — so the
+	// curl field differs between webgl2 and webgpu for any non-zero seed. Our golden
+	// is rendered by webgl2 (GLSL), so the GLSL value is authoritative here.
+	vec3 vSeeded = v + float(u_seed) * 0.1271;
 
 	// First corner
 	vec3 i = floor(vSeeded + dot(vSeeded, C.yyy));
