@@ -20,12 +20,15 @@ Everything downstream of the graph (texture pooling, double-buffering, pass exec
 presentation) is backend work; everything upstream is pure data logic. noisemaker-godot
 gives the graph **two producers**:
 
-- **(a) Golden / offline** — `tools/export-graph.mjs` runs the *unchanged reference*
-  `compileGraph` and serialises the graph to JSON. Zero parity risk (it is the reference
-  code). Reused verbatim from the Unity port; it imports the reference engine from
-  `NM_REFERENCE_ROOT` (a checkout of the Noisemaker reference repo) — no sibling assumed.
-- **(b) Live / in-engine** *(staged)* — a GDScript port of the DSL frontend under
-  `addons/noisemaker/compiler/`, validated by diffing its JSON against (a).
+- **(a) Live / in-engine (production)** — the GDScript compiler under
+  `addons/noisemaker/compiler/` (`lang/`: lexer→parser→validator→effect-registry; `graph/`:
+  expander→orchestrator). `Orchestrator.new(EffectRegistry.new()).build_graph(source)` emits the
+  normalized graph with no reference/Node/network. Gated stage-by-stage against the reference
+  (`parity/check_*.mjs`, **158/158**) and byte-identical to (b) — rendering either graph yields the
+  same PNG.
+- **(b) Golden / offline (parity only)** — `tools/export-graph.mjs` runs the *unchanged reference*
+  `compileGraph` and serialises the graph to JSON. Used only to verify (a); it imports the reference
+  engine from `NM_REFERENCE_ROOT` (a checkout of the Noisemaker reference repo) — no sibling assumed.
 
 Both feed the same `nm_backend.gd` executor and the same Godot-GLSL shaders.
 
@@ -38,13 +41,13 @@ draws rather than compute dispatches.
 
 | Reference | noisemaker-godot |
 |---|---|
-| `resources.js` liveness + linear-scan pool | *(staged — `dim.gd`/`texture_pool.gd`)*. Tier-1 allocates per-texId directly; `screen`/`auto` dims resolved, full Dim rules pending. |
-| `pipeline.js` surfaces (`o0..o7`, geo, vol) | `nm_backend.gd` allocates `global_*` surfaces as `RDTexture`s; double-buffering staged (Tier-1 DAGs need none). |
-| `backend.executePass` (render/MRT/points/repeat/blend) | `nm_backend.gd` — `RenderingDevice` draw lists. Render ✓; MRT/points/repeat/blend staged. |
+| `resources.js` liveness + linear-scan pool | `compiler/graph/resources.gd` (`allocate_resources`, runs inside `Orchestrator.build_graph`) + `compiler/graph/dim.gd`. Surfaces are then allocated per-texId in `nm_backend.gd::allocate_textures`. (No `texture_pool.gd`.) |
+| `pipeline.js` surfaces (`o0..o7`, geo, vol) | `nm_backend.gd` allocates `global_*` surfaces as `RDTexture`s, with **ping-pong double-buffering** for state/feedback surfaces (`_pingpong`). |
+| `backend.executePass` (render/MRT/points/repeat/blend) | `nm_backend.gd` — `RenderingDevice` draw lists: render, **MRT** (N-attachment), **points/billboards** (`RENDER_PRIMITIVE_POINTS`, `ONE,ONE` additive), **repeat** loops, **feedback** — all implemented. |
 | fullscreen triangle VS + default present blit | `FULLSCREEN_VS` (vertex-buffer triangle) + `BLIT_FS` constants in `nm_backend.gd`. |
 | per-frame uniform flow | packed `vec4 data[N]` UBO per pass (see "Uniform model"). |
-| `Pipeline.render(time)` control flow | `nm_backend.gd::render(graph, time)` — passes in order; normalized 0..1 time. |
-| host API (`getOutput`, resize) | `tools/render_graph.gd` (offline); an editor `NMRenderer` node is staged. |
+| `Pipeline.render(time)` control flow | `nm_backend.gd::render(graph, normalized_time := 0.25)` — passes in order; stateful sims via `render_samples(graph, total_frames, sample_every)`. |
+| host API (`getOutput`, resize) | scripting-only: `Backend.setup` / `render` / `render_samples` / `save_surface_png` + `tools/render_graph.gd` / `present.gd`. A drop-in editor `NMRenderer` node is not yet shipped. |
 
 ## Shaders — `addons/noisemaker/shaders/`
 
@@ -97,12 +100,15 @@ the shader is cached per (program, define-set). Input textures bind as combined
   `parity/export-and-render.mjs` (reused from the Unity port; needs Playwright + Chrome).
 - `parity/compare.py` — max-abs-diff + SSIM with per-program tolerance (reused verbatim).
 
-**Status:** 8/8 Tier-1 verified pixel-identical on Apple M4/Metal (max-abs-diff 1,
-SSIM ≈ 1.0). The harness is how each further port gets verified.
+**Status (2026-06-21, Apple M4/Metal):** the in-engine compiler passes all six gates
+(`parity/check_{lex,parse,validate,expand,graph,registry}.mjs`) at **158/158**; the 2D + agent
+catalog passes `parity/sweep.sh` (last recorded **93/93, 2 chaos-gated skips**), most within 1/255
+(SSIM ≈ 1.0). The harness is how each further port gets verified — see `parity/README.md`.
 
-## Out of scope for the first cut (staged)
+## Still staged
 
-Full Dim resolution + liveness texture pool; double-buffered state/feedback surfaces;
-MRT / points-scatter / repeat-loop passes (agents); 3D volumes + raymarch + meshes; the
-live GDScript DSL compiler; oscillator/MIDI/audio automation; tiled hi-res export. The
-graph model carries the fields so these slot in without reshaping the executor.
+3D volumes + raymarch + meshes (`synth3d`/`filter3d` ship definitions but **no shaders**);
+same-pass read+write ping-pong for `cellularAutomata`; a drop-in editor `NMRenderer` node;
+oscillator/MIDI/audio automation; tiled hi-res export. The graph model carries the fields so these
+slot in without reshaping the executor. *(Done since the first cut: the live GDScript compiler, the
+liveness pool, ping-pong double-buffering, and MRT/points/repeat/blend passes.)*

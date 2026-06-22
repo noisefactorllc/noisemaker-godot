@@ -1,5 +1,15 @@
 # Noisemaker → Godot Port — Implementation Plan
 
+> **STATUS (2026-06-21) — this is the original phased plan, kept for history; the build has moved
+> past it.** Phases 0–6 are substantially complete: the live in-engine GDScript compiler shipped under
+> `addons/noisemaker/compiler/{lang,graph}` (parity-verified 158/158); the runtime was **consolidated
+> into a single `runtime/nm_backend.gd`** (the 9-file `runtime/` breakdown below and the
+> `nm_fullscreen.glsl`/`nm_blit.glsl` files were never created — the VS + blit are `FULLSCREEN_VS` /
+> `BLIT_FS` constants, and the offline renderer is `tools/render_graph.gd`); MRT/points/repeat/blend
+> and ping-pong double-buffering are implemented. **Remaining staged work:** 3D (`synth3d`/`filter3d`),
+> an editor `NMRenderer` node, and same-pass ping-pong for `cellularAutomata`. For current state see
+> `../README.md` and `../ARCHITECTURE.md`; this file is design history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A structural port of the Noisemaker shader engine (the Noisemaker reference engine) to **Godot 4.7**, mirroring the existing Unity/HLSL port: live procedural texture from the Polymorphic DSL, rendered through Godot's low-level `RenderingDevice` GPGPU pipeline, **tolerance-parity** to the JS/WebGL2 reference.

@@ -1,8 +1,8 @@
 # The Chaos Gate — why chaotic agent flows aren't bit-parity on this port
 
-**TL;DR.** Every effect in this port is bit-for-bit identical to the reference (`max-diff 0`)
-**except one class: chaotic agent flows** (`points/flow`, and the north-star `target.dsl` that
-feeds it into navierStokes). Those render correctly, deterministically, and stay bounded — but
+**TL;DR.** The one **structurally**-divergent class on this port is **chaotic agent flows**
+(`points/flow`, and the north-star `target.dsl` that feeds it into navierStokes). Those render
+correctly, deterministically, and stay bounded — but
 they're a *different instance* of the chaos, not a pixel match (full-chain SSIM 0.5–0.73 over the
 30 s / 5 s sampling). The cause is a **single `pow`**: a spec-legal ~1-ULP rounding difference in
 Godot's shader-compiler that a chaotic feedback loop amplifies into a different particle field.
@@ -13,6 +13,10 @@ the addon, shader, driver, or environment.
 This is the project's existing **"continuous solvers diverge cross-backend"** principle (already
 documented for `reactionDiffusion`, see `reference/08-math-primitives-parity.md`) confirmed for the
 chaotic *agent flow*, now pinned to one operation.
+
+(There is also a *second, much milder* class — ~13 effects — that drifts ≤1–2 LSB on <0.2 % of pixels
+at NEAREST-resampling / discontinuity boundaries and is SSIM-gated in `parity/sweep.sh`; it is **not**
+structural chaos. See "Scope" below. Everything outside these two classes is `max-diff 0`.)
 
 ---
 
@@ -72,7 +76,7 @@ algorithm, same palette, same dynamics, same *kind* of structure; different exac
 
 ## Evidence — the divergence is pinned to that one `pow`
 
-A reproducible isolation chain (all DSLs live in `parity/corpus/programs/`, harness in `parity/`):
+A reproducible isolation chain (DSLs in `parity/corpus/programs/` and `parity/programs/`, harness in `parity/`):
 
 | Test DSL                | What it isolates                                                              | Result                |
 | ----------------------- | ----------------------------------------------------------------------------- | --------------------- |
@@ -94,13 +98,19 @@ is the mechanism:
 - `MVK_CONFIG_FAST_MATH_ENABLED=0`
 - both RenderingDevice drivers (MoltenVK and native Metal)
 
-## Scope — exactly one class of effect; everything else is bit-exact
+## Scope — one structurally-divergent class
 
-Affected: **chaotic agent flows only** (`points/flow`; the `target.dsl` north-star through it).
+**Structurally divergent (the chaos gate):** chaotic agent flows only (`points/flow`; the
+`target.dsl` north-star through it).
 
-Bit-exact (`max-diff 0`, verified): all 93 isolated effects in `parity/sweep.sh`, the navierStokes
-solver in isolation, the entire deposit / diffuse / blend path, agent spawn, all non-chaotic
-stateful sims at their stable regimes.
+**A second, milder class** (~13 effects, SSIM-gated with documented per-program tolerances in
+`parity/sweep.sh`): NEAREST coord-resampling tie-breaks (`rotate`/`uvRemap`/`distortion`),
+`step()`/contrast convolutions over noise (`shadow`/`edge`/`newton`), and AA derivative taps
+(`pinch`/`crt`) drift ≤1–2 LSB on <0.2 % of pixels — faithful ports where cross-device fp rounding
+lands on the far side of a boundary. Not structural chaos; a frozen frame still tracks the golden.
+
+**Everything else is `max-diff 0`** (verified): the navierStokes solver in isolation, the entire
+deposit / diffuse / blend path, agent spawn, and all non-chaotic stateful sims at their stable regimes.
 
 **The target is stable, not broken.** Blown-out (pure-white) pixels hold at ~0.5–1 % of the frame,
 in line with the golden's ~0–0.8 %; mean brightness stays bounded and oscillates with the loop
