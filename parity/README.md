@@ -25,6 +25,17 @@ NM_REFERENCE_ROOT=... GODOT=... bash parity/sweep.sh
 
 # stateful sims (navierStokes, feedback): sample a 30 s / 5 s evolution, not a frozen frame
 NM_REFERENCE_ROOT=... GODOT=... bash parity/run_samples.sh navierStokes
+
+# temporalAberration is a temporal delay-line (8-stage shift register). Its single-frame golden
+# is NON-DETERMINISTIC (the persistent _h* history is primed by the demo's pre-pin RAF warmup —
+# re-minting varies by max-abs-diff ~229). Drive it as 30 s / 10 s samples instead: both renderers
+# flush the warmup out of the 8-deep line and reach a deterministic steady state (t>=10), where the
+# candidate matches byte-for-byte (3/3 samples, max-abs-diff=2). sweep.sh routes it here automatically.
+# Mint its goldens in timed mode (NOT the single-frame command below):
+NM_REFERENCE_ROOT=... SHADE_HEADLESS=1 node parity/export-and-render.mjs \
+    parity/programs/temporalAberration.dsl parity/out --size 256 --backend webgl2 \
+    --run-seconds 30 --sample-every 10
+NM_REFERENCE_ROOT=... GODOT=... bash parity/run_samples.sh temporalAberration 2.001 0.98 30 10 256
 ```
 
 Pieces:

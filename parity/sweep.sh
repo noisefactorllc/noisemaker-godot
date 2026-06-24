@@ -31,6 +31,31 @@ tol_for() {
 pass=0; fail=0; skip=0; failed=""
 for dsl in "$ROOT"/parity/programs/*.dsl; do
 	name=$(basename "$dsl" .dsl)
+	# Timed-sampling effects have NO valid single-frame golden — their golden is a TIMED SERIES
+	# (parity/run_samples.sh), not a pinned frame. temporalAberration is a temporal delay-line
+	# (an 8-stage RGBA shift register): the reference's single-frame golden is NON-DETERMINISTIC
+	# because the persistent _h* history textures are primed by the demo's pre-pin RAF warmup
+	# (re-minting the single-frame golden varies by max-abs-diff ~229). Driven instead as 30s/10s
+	# samples, BOTH renderers flush the warmup out of the 8-deep line and reach a DETERMINISTIC
+	# steady state (reference run-to-run max-diff 0 at t>=10), where the Godot candidate matches
+	# byte-for-byte (3/3 samples max-abs-diff=2 == rgba8 float round-trip, ssim 0.99997). This is
+	# a REAL parity pass via the same mechanism as navierStokes, counted in the sweep total.
+	case "$name" in
+		temporalAberration)
+			r=$(GODOT="$GODOT" bash "$ROOT/parity/run_samples.sh" "$name" 2.001 0.98 30 10 256 2>&1 | grep -E "=== SAMPLES:" | tail -1)
+			echo "$r"
+			case "$r" in
+				*" pass "*) n_pass="${r#*SAMPLES: $name }"; n_pass="${n_pass%%/*}"
+					n_tot="${r#*SAMPLES: $name $n_pass/}"; n_tot="${n_tot%% *}"
+					if [ "$n_pass" = "$n_tot" ] && [ "$n_tot" -gt 0 ]; then
+						echo "[PASS] $name (timed-sampling $n_pass/$n_tot)"; pass=$((pass + 1))
+					else
+						echo "[FAIL] $name (timed-sampling $n_pass/$n_tot)"; fail=$((fail + 1)); failed="$failed $name"
+					fi ;;
+				*) echo "[FAIL] $name (timed-sampling: no result)"; fail=$((fail + 1)); failed="$failed $name" ;;
+			esac
+			continue ;;
+	esac
 	[ -f "$ROOT/parity/out/$name.golden.png" ] || continue
 	# Effects that are faithful ports but cannot be bit-reproduced across the MoltenVK<->ANGLE
 	# (Metal) boundary are SKIPPED, not failed. reactionDiffusion: a continuous Gray-Scott
@@ -50,7 +75,7 @@ for dsl in "$ROOT"/parity/programs/*.dsl; do
 			# PASS at ssim 0.99996; pure-feedback corr 0.998; Godot bit-deterministic across runs
 			# (max-diff 0). Only the DEFAULT unsharp-mask (amount 2.5) diverges — an *expansive*
 			# feedback loop that amplifies bit-level cross-GPU exp()/filtering differences over the 8
-			# settle frames. Same documented chaos class as reactionDiffusion / temporalAberration.
+			# settle frames. Same documented chaos class as reactionDiffusion.
 			echo "[SKIP] $name: expansive-feedback chaos (port correct in isolation; default unsharp amplifies cross-GPU fp non-determinism over 8 settle frames)"
 			skip=$((skip + 1)); continue ;;
 	esac
