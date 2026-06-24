@@ -18,5 +18,5 @@ void main() {
 
 	// Apply intensity decay (persistence)
 	float decay = clamp(intensity / 100.0, 0.0, 1.0);
-	fragColor = trailColor * decay;
+	fragColor = clamp(trailColor * decay, 0.0, 1.0);
 }

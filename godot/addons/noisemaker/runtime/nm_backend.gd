@@ -370,24 +370,67 @@ func _get_shader(cache_key: String, vert_src: String, frag_src: String) -> RID:
 	_shaders[cache_key] = sh
 	return sh
 
+# Reference blend-factor name -> Godot RenderingDevice.BLEND_FACTOR_*. The reference
+# per-pass `blend: ['src','dst']` array (e.g. pointsBillboardRender's alpha deposit
+# 'ONE'/'ONE_MINUS_SRC_ALPHA') names a WebGL blendFunc pair; map both color and alpha.
+func _blend_factor(name: String) -> int:
+	match name:
+		"ONE":
+			return RenderingDevice.BLEND_FACTOR_ONE
+		"ZERO":
+			return RenderingDevice.BLEND_FACTOR_ZERO
+		"SRC_ALPHA":
+			return RenderingDevice.BLEND_FACTOR_SRC_ALPHA
+		"ONE_MINUS_SRC_ALPHA":
+			return RenderingDevice.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+		"DST_ALPHA":
+			return RenderingDevice.BLEND_FACTOR_DST_ALPHA
+		"ONE_MINUS_DST_ALPHA":
+			return RenderingDevice.BLEND_FACTOR_ONE_MINUS_DST_ALPHA
+		"SRC_COLOR":
+			return RenderingDevice.BLEND_FACTOR_SRC_COLOR
+		"ONE_MINUS_SRC_COLOR":
+			return RenderingDevice.BLEND_FACTOR_ONE_MINUS_SRC_COLOR
+		"DST_COLOR":
+			return RenderingDevice.BLEND_FACTOR_DST_COLOR
+		"ONE_MINUS_DST_COLOR":
+			return RenderingDevice.BLEND_FACTOR_ONE_MINUS_DST_COLOR
+	push_error("unknown blend factor: " + name)
+	return RenderingDevice.BLEND_FACTOR_ONE
+
+# Resolve a pass's `blend` field to a blend descriptor + a stable pipeline-cache token.
+#   blend: true            -> additive ONE/ONE on both color+alpha (agent deposit default)
+#   blend: ['src','dst']   -> the named factor pair (premultiplied OVER etc.)
+#   absent / false         -> no blend (replace)
+func _resolve_blend(p: Dictionary) -> Dictionary:
+	var b = p.get("blend", false)
+	if typeof(b) == TYPE_ARRAY and b.size() == 2:
+		var src := _blend_factor(str(b[0]))
+		var dst := _blend_factor(str(b[1]))
+		return {"enable": true, "src": src, "dst": dst, "key": "%d_%d" % [src, dst]}
+	if typeof(b) == TYPE_BOOL and b:
+		var one := RenderingDevice.BLEND_FACTOR_ONE
+		return {"enable": true, "src": one, "dst": one, "key": "add"}
+	return {"enable": false, "src": 0, "dst": 0, "key": "rep"}
+
 func _get_pipeline(cache_key: String, shader: RID, fb_format: int, n_attach: int,
-		primitive: int, additive: bool, vfmt: int) -> RID:
-	var key := "%s:%d:%d:%d:%s" % [cache_key, fb_format, n_attach, primitive, "add" if additive else "rep"]
+		primitive: int, blend_spec: Dictionary, vfmt: int) -> RID:
+	var key := "%s:%d:%d:%d:%s" % [cache_key, fb_format, n_attach, primitive, str(blend_spec.get("key", "rep"))]
 	if _pipelines.has(key):
 		return _pipelines[key]
 	var blend := RDPipelineColorBlendState.new()
 	for _i in n_attach:
 		var a := RDPipelineColorBlendStateAttachment.new()
-		if additive:
-			# Additive ONE,ONE accumulation for agent deposit passes (HDR trail). The
-			# reference notes Babylon's ALPHA_ADD (SRC_ALPHA,ONE) crushes accumulation —
-			# it must be straight ONE,ONE on both color and alpha.
+		if blend_spec.get("enable", false):
+			# Named factors applied to both color and alpha. The default deposit case is
+			# ONE/ONE (the reference notes Babylon's ALPHA_ADD (SRC_ALPHA,ONE) crushes
+			# accumulation — additive must be straight ONE,ONE on both color and alpha).
 			a.enable_blend = true
-			a.src_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
-			a.dst_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+			a.src_color_blend_factor = blend_spec["src"]
+			a.dst_color_blend_factor = blend_spec["dst"]
 			a.color_blend_op = RenderingDevice.BLEND_OP_ADD
-			a.src_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
-			a.dst_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+			a.src_alpha_blend_factor = blend_spec["src"]
+			a.dst_alpha_blend_factor = blend_spec["dst"]
 			a.alpha_blend_op = RenderingDevice.BLEND_OP_ADD
 		blend.attachments.push_back(a)
 	var p := rd.render_pipeline_create(shader, fb_format, vfmt,
@@ -648,9 +691,9 @@ func execute_pass(p: Dictionary) -> void:
 	var n_attach := out_rids.size()
 	var primitive := RenderingDevice.RENDER_PRIMITIVE_POINTS if draw_mode == "points" \
 		else RenderingDevice.RENDER_PRIMITIVE_TRIANGLES
-	var additive := bool(p.get("blend", false))
+	var blend_spec := _resolve_blend(p)
 	var vfmt := _vfmt_empty if is_points else _vfmt
-	var pipeline := _get_pipeline(cache_key, shader, fb_format, n_attach, primitive, additive, vfmt)
+	var pipeline := _get_pipeline(cache_key, shader, fb_format, n_attach, primitive, blend_spec, vfmt)
 
 	var set0_uniforms := []
 	if ptype == "blit":
@@ -771,6 +814,8 @@ func render(graph: Dictionary, normalized_time: float = 0.25) -> void:
 	for _frame in frames:
 		_begin_frame()
 		for p in graph.get("passes", []):
+			if _should_skip_pass(p):
+				continue
 			# A pass may repeat within the frame (reference §10.5, e.g. reactionDiffusion's
 			# `repeat: "iterations"` solver). Each iteration ping-pongs so it reads the prior
 			# iteration's output (§10.6) — distinct from the within-frame and end-of-frame swaps.
@@ -798,6 +843,8 @@ func render_samples(graph: Dictionary, total_frames: int, sample_every: int) -> 
 		_frame_index = frame
 		_begin_frame()
 		for p in graph.get("passes", []):
+			if _should_skip_pass(p):
+				continue
 			var rc := _repeat_count(p)
 			for _iter in rc:
 				execute_pass(p)
@@ -814,6 +861,51 @@ func render_samples(graph: Dictionary, total_frames: int, sample_every: int) -> 
 		if frame % sample_every == 0:
 			samples.append(_snapshot_surface())
 	return samples
+
+# reference Pipeline.shouldSkipPass: a pass with conditions.{skipIf|runIf}:[{uniform,equals}]
+# runs conditionally on a resolved uniform. skipIf -> skip when ANY matches; runIf -> skip
+# when ANY does NOT match. The condition value resolves from the pass's flattened uniforms
+# (the compiler bakes every global's resolved value into pass.uniforms), with the effect-def
+# global default as fallback.
+#
+# NOTE: the reference graph compiler (expand) does NOT copy passDef.conditions onto the
+# compiled-graph passes, so in practice this is a no-op for the current catalog (and the
+# graph-parity gate confirms the port's graph matches reference WITHOUT conditions). It is
+# implemented here for faithfulness with shouldSkipPass and forward-compatibility if a graph
+# ever carries conditions.
+func _condition_value(p: Dictionary, name: String):
+	var u: Dictionary = p.get("uniforms", {})
+	if u.has(name):
+		return u[name]
+	var def := _load_effect_def(str(p.get("namespace")), str(p.get("func")))
+	var globals: Dictionary = def.get("globals", {})
+	if globals.has(name) and globals[name] is Dictionary and globals[name].has("default"):
+		return globals[name]["default"]
+	return null
+
+func _cond_equals(a, b) -> bool:
+	# Compare loosely across the int/float/bool the JSON/compiler may produce.
+	if typeof(a) == TYPE_BOOL or typeof(b) == TYPE_BOOL:
+		return bool(a) == bool(b)
+	if (typeof(a) == TYPE_INT or typeof(a) == TYPE_FLOAT) and (typeof(b) == TYPE_INT or typeof(b) == TYPE_FLOAT):
+		return is_equal_approx(float(a), float(b))
+	return a == b
+
+func _should_skip_pass(p: Dictionary) -> bool:
+	var cond = p.get("conditions", null)
+	if not (cond is Dictionary):
+		return false
+	var skip_if = cond.get("skipIf", null)
+	if skip_if is Array:
+		for c in skip_if:
+			if c is Dictionary and _cond_equals(_condition_value(p, str(c.get("uniform"))), c.get("equals")):
+				return true
+	var run_if = cond.get("runIf", null)
+	if run_if is Array:
+		for c in run_if:
+			if c is Dictionary and not _cond_equals(_condition_value(p, str(c.get("uniform"))), c.get("equals")):
+				return true
+	return false
 
 # reference §10.5 resolveRepeatCount: no repeat -> 1; number -> max(1,floor); string ->
 # look it up in the pass uniforms (the iteration count is a pass uniform, e.g. iterations=8).

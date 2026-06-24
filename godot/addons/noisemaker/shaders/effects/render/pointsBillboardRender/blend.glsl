@@ -1,12 +1,14 @@
 #version 450
-// render/pointsBillboardRender — program "blend" (alpha-composite the billboard trail OVER
-// the chained input). Ported from glsl/blend.glsl. Unlike pointsRender's additive blend,
-// this is premultiplied over-compositing: trail over (input × inputIntensity).
+// render/pointsBillboardRender — program "blend" (composite the billboard trail OVER the
+// chained input). Ported from glsl/blend.glsl. The deposit pass runs in one of two blend
+// modes (blendMode: additive=0 / alpha=1); the blend pass un-premultiplies accordingly.
 // Layout effect: vec4 data[1] (uniformLayouts.blend): resolution=data[0].xy,
-// inputIntensity=data[0].z. Inputs: inputTex=1, trailTex=2. gl_FragCoord top-left — NO Y-flip.
+// inputIntensity=data[0].z, blendMode=data[0].w. Inputs: inputTex=1, trailTex=2.
+// gl_FragCoord top-left — NO Y-flip.
 layout(set = 0, binding = 0, std140) uniform Params { vec4 data[1]; };
 #define resolution data[0].xy
 #define inputIntensity data[0].z
+#define blendMode int(data[0].w)
 layout(set = 0, binding = 1) uniform sampler2D inputTex;
 layout(set = 0, binding = 2) uniform sampler2D trailTex;
 layout(location = 0) out vec4 fragColor;
@@ -23,11 +25,22 @@ void main() {
 	float t = inputIntensity / 100.0;
 	vec4 scaledInput = inputColor * t;
 
-	// Alpha compositing: trail over input
-	float outAlpha = trailColor.a + scaledInput.a * (1.0 - trailColor.a);
-	vec3 outRGB = outAlpha > 0.0
-		? (trailColor.rgb * trailColor.a + scaledInput.rgb * scaledInput.a * (1.0 - trailColor.a)) / outAlpha
-		: vec3(0.0);
+	vec3 outRGB;
+	float outAlpha;
 
-	fragColor = vec4(outRGB, outAlpha);
+	if (blendMode == 1) {
+		// Alpha mode: trail stores premultiplied values (rgb = actual_color * alpha).
+		// Use premultiplied OVER operator then convert to straight for output.
+		outAlpha = trailColor.a + scaledInput.a * (1.0 - trailColor.a);
+		vec3 outRGB_pre = trailColor.rgb + scaledInput.rgb * scaledInput.a * (1.0 - trailColor.a);
+		outRGB = outAlpha > 0.0 ? outRGB_pre / outAlpha : vec3(0.0);
+	} else {
+		// Additive mode: trail stores additive sums; treat as pseudo-non-premultiplied.
+		outAlpha = trailColor.a + scaledInput.a * (1.0 - trailColor.a);
+		outRGB = outAlpha > 0.0
+			? (trailColor.rgb * trailColor.a + scaledInput.rgb * scaledInput.a * (1.0 - trailColor.a)) / outAlpha
+			: vec3(0.0);
+	}
+
+	fragColor = clamp(vec4(outRGB, outAlpha), 0.0, 1.0);
 }
