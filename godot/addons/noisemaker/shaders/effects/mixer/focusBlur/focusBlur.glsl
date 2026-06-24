@@ -1,10 +1,11 @@
 #version 450
-// mixer/focusBlur — ported from wgsl/focusBlur.wgsl. Focus blur (depth of field):
-// reconstructs a faux depth buffer from luminance to drive a 9x9 Gaussian blur whose
-// radius grows with distance from the focal plane. No-layout effect: backend injects
-// the Params UBO + `#define depthSource …`/`focalDistance …`/`aperture …`/`sampleBias …`.
-// Two inputs (pass.inputs order): inputTex (binding 1), tex (binding 2).
-// NOTE: WGSL helper param `resolution` collides with the injected engine name — renamed
+// mixer/focusBlur — ported from glsl/focusBlur.glsl. Focus blur (depth of field):
+// reconstructs a faux depth buffer from luminance to drive a 64-sample golden-angle
+// spiral disk blur whose radius grows with distance from the focal plane. No-layout
+// effect: backend injects the Params UBO + `#define depthSource …`/`focalDistance …`/
+// `aperture …`/`sampleBias …`. Two inputs (pass.inputs order): inputTex (binding 1),
+// tex (binding 2).
+// NOTE: helper param `resolution` collides with the injected engine name — renamed
 // to `res` (pure symbol rename, matches the HLSL port's `resolutionDims`).
 layout(set = 0, binding = 1) uniform sampler2D inputTex;
 layout(set = 0, binding = 2) uniform sampler2D tex;
@@ -23,64 +24,49 @@ float computeBlurFactor(float depth) {
 	return clamp(blur, 0.0, 1.0);
 }
 
-// Apply depth of field blur using inputTex as scene, tex as depth
+// Golden-angle spiral disk blur. sceneTex is the texture being blurred; the depth
+// proxy is the OTHER input's luminance. 64 flat-weighted samples spread over a disk
+// whose radius = computeBlurFactor(depth) * sampleBias.
+const float GOLDEN = 2.399963;
+
+// Apply depth of field blur using inputTex as depth, tex as scene
 vec4 applyFocusBlurAB(vec2 uv, vec2 res) {
 	// Sample depth texture and compute luminosity as depth proxy
 	vec4 depthSample = texture(inputTex, uv);
 	float depth = getLuminosity(depthSample.rgb);
 
-	// Calculate blur amount based on distance from focal plane
-	float blurFactor = computeBlurFactor(depth) * 10.0;
+	// Calculate blur radius based on distance from focal plane
+	float blurRadius = computeBlurFactor(depth) * sampleBias;
 
 	vec4 color = vec4(0.0);
-	float totalWeight = 0.0;
-
-	// Gaussian blur convolution kernel (9x9)
-	for (int x = -4; x <= 4; x = x + 1) {
-		for (int y = -4; y <= 4; y = y + 1) {
-			vec2 offset = vec2(float(x), float(y)) * sampleBias / res;
-
-			// Gaussian weight based on distance from center
-			float dist2 = float(x * x + y * y);
-			float sigma2 = 2.0 * blurFactor * blurFactor;
-			float weight = exp(-dist2 / max(sigma2, 0.001));
-
-			color = color + texture(tex, uv + offset) * weight;
-			totalWeight = totalWeight + weight;
-		}
+	for (int i = 0; i < 64; i++) {
+		float r = sqrt(float(i) / 64.0);
+		float theta = float(i) * GOLDEN;
+		vec2 offset = vec2(cos(theta), sin(theta)) * r * blurRadius / res;
+		color += texture(tex, uv + offset);
 	}
 
-	return color / totalWeight;
+	return color / 64.0;
 }
 
-// Apply depth of field blur using tex as scene, inputTex as depth
+// Apply depth of field blur using tex as depth, inputTex as scene
 vec4 applyFocusBlurBA(vec2 uv, vec2 res) {
 	// Sample depth texture and compute luminosity as depth proxy
 	vec4 depthSample = texture(tex, uv);
 	float depth = getLuminosity(depthSample.rgb);
 
-	// Calculate blur amount based on distance from focal plane
-	float blurFactor = computeBlurFactor(depth) * 10.0;
+	// Calculate blur radius based on distance from focal plane
+	float blurRadius = computeBlurFactor(depth) * sampleBias;
 
 	vec4 color = vec4(0.0);
-	float totalWeight = 0.0;
-
-	// Gaussian blur convolution kernel (9x9)
-	for (int x = -4; x <= 4; x = x + 1) {
-		for (int y = -4; y <= 4; y = y + 1) {
-			vec2 offset = vec2(float(x), float(y)) * sampleBias / res;
-
-			// Gaussian weight based on distance from center
-			float dist2 = float(x * x + y * y);
-			float sigma2 = 2.0 * blurFactor * blurFactor;
-			float weight = exp(-dist2 / max(sigma2, 0.001));
-
-			color = color + texture(inputTex, uv + offset) * weight;
-			totalWeight = totalWeight + weight;
-		}
+	for (int i = 0; i < 64; i++) {
+		float r = sqrt(float(i) / 64.0);
+		float theta = float(i) * GOLDEN;
+		vec2 offset = vec2(cos(theta), sin(theta)) * r * blurRadius / res;
+		color += texture(inputTex, uv + offset);
 	}
 
-	return color / totalWeight;
+	return color / 64.0;
 }
 
 void main() {
