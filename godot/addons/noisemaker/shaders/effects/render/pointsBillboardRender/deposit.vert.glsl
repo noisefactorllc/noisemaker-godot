@@ -31,9 +31,15 @@ layout(set = 0, binding = 2) uniform sampler2D rgbaTex;
 layout(location = 0) out vec4 vColor;
 layout(location = 1) out vec2 vSpriteUV;
 
+uint hash_uint(uint s) {
+	uint state = s * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
 // Deterministic noise function for per-particle variation
 float hash(float n) {
-	return fract(sin(n + seed) * 43758.5453123);
+	return float(hash_uint(floatBitsToUint(n + seed))) / 4294967295.0;
 }
 
 void main() {
