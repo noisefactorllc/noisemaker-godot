@@ -62,7 +62,8 @@ var graph = Orchestrator.new(reg).build_graph(
 var backend := Backend.new()
 backend.setup(rd, "res://addons/noisemaker", Vector2i(512, 512))
 var img: Image = backend.render_samples(graph, 1, 1)[0]   # one frame
-var tex := ImageTexture.create_from_image(img)            # → any material / TextureRect
+var tex := ImageTexture.create_from_image(img)
+$TextureRect.texture = tex                                # show it (or material.albedo_texture = tex, etc.)
 ```
 
 **Every DSL program** has the same shape: name the namespaces it uses (`search synth, filter`),
@@ -74,13 +75,18 @@ Render a `.dsl` file to a PNG from the command line:
 ```bash
 GODOT=/Applications/Godot.app/Contents/MacOS/Godot
 $GODOT --path godot --script res://addons/noisemaker/tools/render_graph.gd \
-       --position 5000,5000 -- --dsl parity/programs/noise.dsl --out /tmp/noise.png --size 256
+       --position 5000,5000 -- --dsl "$PWD/parity/programs/noise.dsl" --out /tmp/noise.png --size 256
 ```
+
+`render_graph.gd` resolves `--dsl` relative to `res://` (the `godot/` project dir), so pass an
+absolute path.
 
 ## What works today
 
-- The **whole 2D effect catalog** (~180 effects: noise, filters, mixers, classic generators)
-  **renders**, and is **pixel-identical to the web reference** within 8-bit rounding.
+- The **whole 2D effect catalog** (`synth` / `filter` / `mixer` / `classicNoisedeck`, ~155 effects),
+  plus the agent sims, **renders**. The parity sweep passes **93/93** programs: most land within
+  1/255 (SSIM ≈ 1.0); ~13 are SSIM-gated for sub-pixel resampling / discontinuity drift. See
+  **[STATUS.md](STATUS.md)**.
 - **Particle/agent sims and fluid (navier–stokes)** render and match the reference.
 - **Chaotic** particle-and-fluid programs render correctly, but as a *different instance* of the same
   chaos — they match in look and behavior, not pixel-for-pixel (tiny GPU rounding differences get
@@ -102,12 +108,17 @@ GDScript (so it runs in-engine) and executes the graph on Godot's `RenderingDevi
 ## Contributing
 
 The addon needs nothing external. The **dev/parity tooling**, however, compares Godot's output
-against the reference engine, so it needs a checkout of it via `NM_REFERENCE_ROOT`:
+against the reference engine. The mint steps need a checkout of it via `NM_REFERENCE_ROOT`; the
+`parity/out/` goldens they produce are gitignored, so mint them first, then compare:
 
 ```bash
-NM_REFERENCE_ROOT=/path/to/noisemaker GODOT=/path/to/Godot bash parity/run.sh noise
-#   -> [PASS] noise: max-abs-diff=1.000 ... ssim=0.99996
+NM_REFERENCE_ROOT=/path/to/noisemaker node tools/export-graph.mjs --file parity/programs/noise.dsl parity/out/noise.graph.json
+NM_REFERENCE_ROOT=/path/to/noisemaker SHADE_HEADLESS=1 node parity/export-and-render.mjs parity/programs/noise.dsl parity/out --size 256 --backend webgl2
+GODOT=/path/to/Godot bash parity/run.sh noise   # -> [PASS] noise: max-abs-diff=1.000 ... ssim=0.99996
 ```
+
+`run.sh` itself does not read `NM_REFERENCE_ROOT` — it renders the Godot candidate and diffs it
+against the already-minted golden.
 
 → **[parity/README.md](parity/README.md)** (test harness) · **[STATUS.md](STATUS.md)** (coverage +
 gate results) · `reference/01–10` (engine specs shared across all Noisemaker ports).

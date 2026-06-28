@@ -8,13 +8,13 @@ see the [README](README.md).
 
 ## Coverage
 
-**182 effect definitions** and ~184 GLSL shaders across 8 namespaces.
+**183 effect definitions** and ~184 GLSL shaders across 8 namespaces.
 
 | Namespace | Definitions | Shaders | State |
 |---|---|---|---|
 | `synth` | 29 | 33 | renders (generators, df64 fractals, value/simplex/cell/gabor/curl noise) |
 | `filter` | 90 | 105 | renders (color ops, convolutions, warps, multi-pass, feedback) |
-| `mixer` | 14 | 14 | renders (whole namespace) |
+| `mixer` | 15 | 15 | renders (whole namespace) |
 | `classicNoisedeck` | 20 | 18 | renders (legacy generators) |
 | `points` / `render` | 10 / 11 | 2 / 12 | renders — agents (MRT/scatter); chaotic flows chaos-gated |
 | `synth3d` / `filter3d` | 7 / 1 | 0 / 0 | **staged** (definitions only — 3D volumes/raymarch/meshes) |
