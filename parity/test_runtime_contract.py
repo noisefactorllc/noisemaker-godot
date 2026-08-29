@@ -108,6 +108,105 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("DIMENSION_TEST: PASS", result.stdout, result.stdout + result.stderr)
 
+    def test_volume_uniforms_clamp_power_of_two_to_texture_limit(self):
+        script = """
+            extends SceneTree
+
+            func graph_with_volume_size(value: int) -> Dictionary:
+                return {
+                    "passes": [{
+                        "uniforms": {
+                            "volumeSize": value,
+                            "volumeSize_chain_0": value,
+                            "volumeSize_node_0": value,
+                            "unrelated": value,
+                        },
+                    }],
+                    "textures": {},
+                }
+
+            func _init() -> void:
+                var backend_script = load("res://addons/noisemaker/runtime/nm_backend.gd")
+                var backend = backend_script.new()
+                if not backend.has_method("_clamp_graph_volume_sizes"):
+                    print("VOLUME_LIMIT_TEST: missing clamp method")
+                    quit(1)
+                    return
+                var constrained := graph_with_volume_size(128)
+                var exact_fit := graph_with_volume_size(128)
+                backend.call("_clamp_graph_volume_sizes", constrained, 8192)
+                backend.call("_clamp_graph_volume_sizes", exact_fit, 16384)
+                var constrained_uniforms: Dictionary = constrained["passes"][0]["uniforms"]
+                var exact_uniforms: Dictionary = exact_fit["passes"][0]["uniforms"]
+                var constrained_ok: bool = constrained_uniforms == {
+                    "volumeSize": 64,
+                    "volumeSize_chain_0": 64,
+                    "volumeSize_node_0": 64,
+                    "unrelated": 128,
+                }
+                var exact_ok: bool = exact_uniforms["volumeSize"] == 128 \
+                    and exact_uniforms["volumeSize_chain_0"] == 128 \
+                    and exact_uniforms["volumeSize_node_0"] == 128
+                if constrained_ok and exact_ok:
+                    print("VOLUME_LIMIT_TEST: PASS")
+                    quit(0)
+                else:
+                    print("VOLUME_LIMIT_TEST: constrained=", constrained_uniforms, " exact=", exact_uniforms)
+                    quit(1)
+        """
+        result = self._run_godot_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VOLUME_LIMIT_TEST: PASS", result.stdout, result.stdout + result.stderr)
+
+    def test_mrt_budget_demotes_trailing_float_attachment_only_when_needed(self):
+        script = """
+            extends SceneTree
+
+            func graph_with_mrt() -> Dictionary:
+                return {
+                    "passes": [{
+                        "id": "pointsEmit:init",
+                        "outputs": {"xyzOut": "xyz", "velOut": "vel", "rgbaOut": "rgba"},
+                    }],
+                    "textures": {
+                        "xyz": {"format": "rgba32f"},
+                        "vel": {"format": "rgba32float"},
+                        "rgba": {"format": "rgba8"},
+                    },
+                }
+
+            func _init() -> void:
+                var backend_script = load("res://addons/noisemaker/runtime/nm_backend.gd")
+                var backend = backend_script.new()
+                if not backend.has_method("_apply_mrt_format_budget"):
+                    print("MRT_BUDGET_TEST: missing budget method")
+                    quit(1)
+                    return
+                var constrained := graph_with_mrt()
+                var desktop := graph_with_mrt()
+                backend.call("_apply_mrt_format_budget", constrained, 32)
+                backend.call("_apply_mrt_format_budget", desktop, 64)
+                var constrained_textures: Dictionary = constrained["textures"]
+                var desktop_textures: Dictionary = desktop["textures"]
+                var constrained_ok: bool = constrained_textures["xyz"]["format"] == "rgba32f" \
+                    and constrained_textures["vel"]["format"] == "rgba16f" \
+                    and constrained_textures["rgba"]["format"] == "rgba8"
+                var desktop_ok: bool = desktop_textures["xyz"]["format"] == "rgba32f" \
+                    and desktop_textures["vel"]["format"] == "rgba32float" \
+                    and desktop_textures["rgba"]["format"] == "rgba8"
+                if constrained_ok and desktop_ok:
+                    print("MRT_BUDGET_TEST: PASS")
+                    quit(0)
+                else:
+                    print("MRT_BUDGET_TEST: constrained=", constrained_textures, " desktop=", desktop_textures)
+                    quit(1)
+        """
+        result = self._run_godot_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("MRT_BUDGET_TEST: PASS", result.stdout, result.stdout + result.stderr)
+
     def test_audio_samples_pack_into_declared_scope_and_spectrum_slots(self):
         script = """
             extends SceneTree

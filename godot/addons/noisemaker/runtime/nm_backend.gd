@@ -100,6 +100,8 @@ var _state_node_re: RegEx  # matches particle state-node surface names (isStateS
 var _audio_waveform := PackedFloat32Array()
 var _audio_spectrum := PackedFloat32Array()
 var _audio_layouts := {}
+var _max_texture_size_2d := 0
+var _max_color_bytes_per_sample := 0
 
 func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> void:
 	if _closed:
@@ -108,6 +110,8 @@ func setup(p_rd: RenderingDevice, p_addon_dir: String, p_screen: Vector2i) -> vo
 	rd = p_rd
 	addon_dir = p_addon_dir
 	screen = p_screen
+	_max_texture_size_2d = rd.limit_get(RenderingDevice.LIMIT_MAX_TEXTURE_SIZE_2D)
+	_max_color_bytes_per_sample = _probe_color_bytes_per_sample()
 	# NEAREST + clamp-to-edge — matches the reference WebGL2 backend's effect render
 	# targets (webgl2.js:130-131/221-222 set gl.NEAREST). Effects sample at texel centers
 	# or integer-texel offsets (where NEAREST == LINEAR), so this is invisible to them;
@@ -205,6 +209,105 @@ func _data_format(fmt: String) -> int:
 			return RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
 		_:
 			return RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+
+func _probe_color_bytes_per_sample() -> int:
+	var rgba32f := RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT
+	var rgba16f := RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	var combinations := [
+		{"bytes": 64, "formats": [rgba32f, rgba32f, rgba32f, rgba32f]},
+		{"bytes": 48, "formats": [rgba32f, rgba32f, rgba32f]},
+		{"bytes": 40, "formats": [rgba32f, rgba32f, rgba16f]},
+		{"bytes": 32, "formats": [rgba32f, rgba16f, rgba16f]},
+	]
+	for combination in combinations:
+		var textures := []
+		var supported := true
+		for format in combination["formats"]:
+			var usage := RenderingDevice.TEXTURE_USAGE_COLOR_ATTACHMENT_BIT
+			if not rd.texture_is_format_supported_for_usage(format, usage):
+				supported = false
+				break
+			var texture_format := RDTextureFormat.new()
+			texture_format.width = 2
+			texture_format.height = 2
+			texture_format.format = format
+			texture_format.usage_bits = usage
+			var texture := rd.texture_create(texture_format, RDTextureView.new())
+			if not texture.is_valid():
+				supported = false
+				break
+			textures.append(texture)
+		var framebuffer := RID()
+		if supported:
+			framebuffer = rd.framebuffer_create(textures)
+		var valid := framebuffer.is_valid() and rd.framebuffer_is_valid(framebuffer)
+		if framebuffer.is_valid():
+			rd.free_rid(framebuffer)
+		for texture in textures:
+			if texture.is_valid():
+				rd.free_rid(texture)
+		if valid:
+			return int(combination["bytes"])
+	return 16
+
+func _is_volume_size_uniform(name: String) -> bool:
+	return name == "volumeSize" or name.begins_with("volumeSize_chain_") \
+		or name.begins_with("volumeSize_node_")
+
+func _clamp_volume_size(value, max_texture_size: int):
+	if (typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT) \
+			or max_texture_size <= 0 or float(value) * float(value) <= max_texture_size:
+		return value
+	var clamped := 16
+	while (clamped * 2) * (clamped * 2) <= max_texture_size and clamped * 2 < float(value):
+		clamped *= 2
+	return clamped
+
+func _clamp_graph_volume_sizes(graph: Dictionary, max_texture_size: int) -> void:
+	if max_texture_size <= 0:
+		return
+	for pass_data in graph.get("passes", []):
+		var uniforms: Dictionary = pass_data.get("uniforms", {})
+		for name in uniforms:
+			if _is_volume_size_uniform(str(name)):
+				uniforms[name] = _clamp_volume_size(uniforms[name], max_texture_size)
+
+func _mrt_format_bytes(format: String) -> int:
+	match format:
+		"rgba32f", "rgba32float":
+			return 16
+		"rgba8", "rgba8unorm":
+			return 4
+		_:
+			return 8
+
+func _apply_mrt_format_budget(graph: Dictionary, max_color_bytes_per_sample: int) -> void:
+	if max_color_bytes_per_sample <= 0:
+		return
+	var textures: Dictionary = graph.get("textures", {})
+	for pass_data in graph.get("passes", []):
+		var outputs: Dictionary = pass_data.get("outputs", {})
+		if outputs.size() <= 1:
+			continue
+		var texture_ids := outputs.values()
+		var total := 0
+		for texture_id in texture_ids:
+			var spec: Dictionary = textures.get(str(texture_id), {})
+			total += _mrt_format_bytes(str(spec.get("format", "rgba16f")))
+		if total <= max_color_bytes_per_sample:
+			continue
+		for index in range(texture_ids.size() - 1, -1, -1):
+			if total <= max_color_bytes_per_sample:
+				break
+			var texture_id := str(texture_ids[index])
+			if not textures.has(texture_id):
+				continue
+			var spec: Dictionary = textures[texture_id]
+			var format := str(spec.get("format", "rgba16f"))
+			if format == "rgba32f" or format == "rgba32float":
+				spec["format"] = "rgba16f"
+				textures[texture_id] = spec
+				total -= 8
 
 func _make_tex(w: int, h: int, fmt: int) -> RID:
 	var tf := RDTextureFormat.new()
@@ -311,6 +414,8 @@ func _resolve_dim(d, screen_size: int, uniforms: Dictionary = {}) -> int:
 	return screen_size
 
 func allocate_textures(graph: Dictionary) -> void:
+	_clamp_graph_volume_sizes(graph, _max_texture_size_2d)
+	_apply_mrt_format_budget(graph, _max_color_bytes_per_sample)
 	_surfaces.clear()
 	_frame_read.clear()
 	_frame_write.clear()
