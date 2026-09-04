@@ -31,6 +31,12 @@ const ALLOWED_STRING_PARAMS := [
 const STATE_SURFACES := ["time", "frame", "mouse", "resolution", "seed", "a"]
 const STATE_VALUES := ["time", "frame", "mouse", "resolution", "seed", "a", "u1", "u2", "u3", "u4", "s1", "s2", "b1", "b2", "a1", "a2", "deltaTime"]
 const SURFACE_PASSTHROUGH_CALLS := ["read"]
+const AUTOMATION_FIELDS := {
+	"Oscillator": ["oscType", "min", "max", "speed", "offset", "seed"],
+	"Midi": ["channel", "mode", "min", "max", "sensitivity", "name", "id"],
+	"Audio": ["band", "min", "max", "channel", "name", "id"],
+}
+const MAX_AUTOMATION_DEPTH := 8
 
 const Diagnostics := preload("res://addons/noisemaker/compiler/lang/diagnostics.gd")
 const EnumPaths := preload("res://addons/noisemaker/compiler/lang/enum_paths.gd")
@@ -42,6 +48,7 @@ var _program_search_order: Array
 var _symbols: Dictionary
 var _enums_project: Dictionary   # effect-choice enum tree (reg.enums.project())
 var _enums_std: Dictionary       # standard enum tree (reg.enums.std())
+var _reported_automation_cycles: Dictionary
 
 func _init(registry) -> void:
 	reg = registry
@@ -52,6 +59,7 @@ func validate(ast: Dictionary) -> Dictionary:
 	_diagnostics = []
 	_temp_index = 0
 	_symbols = {}
+	_reported_automation_cycles = {}
 	_enums_project = reg.enums.project()
 	_enums_std = reg.enums.std()
 
@@ -329,46 +337,63 @@ func _is_starter_chain(node) -> bool:
 	var starter = _get_starter_info(node)
 	return starter != null and starter.get("index") == 0
 
-func _substitute(node):
+func _substitute(node, resolving: Array = []):
 	if node == null:
 		return node
 	if not (node is Dictionary):
 		return node
 	var t = node.get("type")
+	if t == "Ident" and resolving.has(node.get("name")):
+		var cycle_start := resolving.find(node["name"])
+		var cycle: Array = resolving.slice(cycle_start)
+		cycle.push_back(node["name"])
+		var cycle_key := " -> ".join(cycle)
+		if not _reported_automation_cycles.has(cycle_key):
+			_reported_automation_cycles[cycle_key] = true
+			_push_diag("S001", node, "Automation cycle detected: %s" % cycle_key)
+		return {"type": "Number", "value": 0, "_automationInvalid": true}
 	if t == "Ident" and _symbols.has(node.get("name")):
-		var result = _substitute(_clone(_symbols[node["name"]]))
+		var next_resolving := resolving.duplicate()
+		next_resolving.push_back(node["name"])
+		var result = _substitute(_clone(_symbols[node["name"]]), next_resolving)
 		if result is Dictionary:
 			result["_varRef"] = node["name"]
 		return result
+	if AUTOMATION_FIELDS.has(t):
+		var mapped: Dictionary = node.duplicate()
+		for field in AUTOMATION_FIELDS[t]:
+			if node.has(field):
+				mapped[field] = _substitute(node[field], resolving)
+		return mapped
 	if t == "Chain":
 		var mapped: Array = []
 		for c in node["chain"]:
 			var mapped_args: Array = []
 			for a in c.get("args", []):
-				mapped_args.push_back(_substitute(a))
+				mapped_args.push_back(_substitute(a, resolving))
 			var mapped_call := {"type": "Call", "name": c.get("name"), "args": mapped_args}
 			if c.get("kwargs") is Dictionary:
 				var kw := {}
 				for k in c["kwargs"].keys():
-					kw[k] = _substitute(c["kwargs"][k])
+					kw[k] = _substitute(c["kwargs"][k], resolving)
 				mapped_call["kwargs"] = kw
 			mapped.push_back(_resolve_call(mapped_call))
 		return {"type": "Chain", "chain": mapped}
 	if t == "Call":
 		var mapped_args: Array = []
 		for a in node.get("args", []):
-			mapped_args.push_back(_substitute(a))
+			mapped_args.push_back(_substitute(a, resolving))
 		var mapped_call := {"type": "Call", "name": node.get("name"), "args": mapped_args}
 		if node.get("kwargs") is Dictionary:
 			var kw := {}
 			for k in node["kwargs"].keys():
-				kw[k] = _substitute(node["kwargs"][k])
+				kw[k] = _substitute(node["kwargs"][k], resolving)
 			mapped_call["kwargs"] = kw
 		return _resolve_call(mapped_call)
 	return node
 
 func _bind_var(v: Dictionary) -> void:
-	var expr = _substitute(_clone(v.get("expr")))
+	var expr = _substitute(_clone(v.get("expr")), [v.get("name")])
 	if expr is Dictionary and _is_starter_chain(expr):
 		var head = _first_chain_call(expr)
 		if head:
@@ -991,11 +1016,11 @@ func _resolve_numeric_arg(node, def: Dictionary, dname, call: Dictionary, spec: 
 			v["max"] = def.get("max")
 		return v  # {fn, min, max} -> {min,max} after JSON
 	if node is Dictionary and node.get("type") == "Oscillator":
-		return _resolve_osc_value(node)
+		return _compile_automation_descriptor(node)
 	if node is Dictionary and node.get("type") == "Midi":
-		return _resolve_midi_value(node)
+		return _compile_automation_descriptor(node)
 	if node is Dictionary and node.get("type") == "Audio":
-		return _resolve_audio_value(node)
+		return _compile_automation_descriptor(node)
 	if node is Dictionary and node.get("type") == "Member":
 		var cur = _resolve_enum(node.get("path"))
 		if cur is float or cur is int:
@@ -1050,120 +1075,177 @@ func _resolve_numeric_arg(node, def: Dictionary, dname, call: Dictionary, spec: 
 		return def.get("default")
 	return def.get("default")
 
-# Oscillator/Midi/Audio value resolution (faithful; the corpus produces none of these value-args).
-func _resolve_osc_value(node: Dictionary) -> Dictionary:
-	var osc_type_value = _enum_from_member_or_ident(node.get("oscType"), "oscKind")
-	if not (osc_type_value is float or osc_type_value is int):
-		osc_type_value = 0
-	var v := {
-		"type": "Oscillator",
-		"oscType": osc_type_value,
-		"min": clampf(_osc_param(node.get("min"), 0), 0.0, 1.0),
-		"max": clampf(_osc_param(node.get("max"), 1), 0.0, 1.0),
-		"speed": _osc_param(node.get("speed"), 1),
-		"offset": _osc_param(node.get("offset"), 0),
-		"seed": _osc_param(node.get("seed"), 1),
-		"_ast": node,
-	}
-	if node.has("_varRef"):
-		v["_varRef"] = node["_varRef"]
-	return v
-
-func _resolve_midi_value(node: Dictionary) -> Dictionary:
-	var mode_node = node.get("mode")
-	var mode_value = null
-	if mode_node is Dictionary and mode_node.get("type") == "Number":
-		var numeric_mode = mode_node.get("value")
-		if (numeric_mode is float or numeric_mode is int) and floorf(float(numeric_mode)) == float(numeric_mode) and numeric_mode >= 0 and numeric_mode <= 4:
-			mode_value = numeric_mode
+# Compile automation descriptors without flattening nested numeric sources.
+func _resolve_automation_enum(node, enum_name: String, fallback, valid_values: Array,
+		descriptor_name: String, field_name: String):
+	var resolved = null
+	if node is Dictionary and node.get("type") == "Number":
+		resolved = node.get("value")
+	elif node is Dictionary and node.get("type") == "Member":
+		resolved = _resolve_enum(node.get("path"))
+	elif node is Dictionary and node.get("type") == "Ident":
+		resolved = _resolve_enum([enum_name, node.get("name")])
+	resolved = _enum_num(resolved)
+	if (resolved is float or resolved is int) and floorf(float(resolved)) == float(resolved) \
+			and valid_values.has(int(resolved)):
+		return resolved
+	if node is Dictionary and node.get("type") == "String":
+		_push_diag("S001", node, "String literal not allowed for %s() %s" % [descriptor_name, field_name])
 	else:
-		mode_value = _enum_from_member_or_ident(mode_node, "midiMode")
-	if not (mode_value is float or mode_value is int):
-		mode_value = 4
-	var v := {
-		"type": "Midi",
-		"channel": _osc_param(node.get("channel"), 1),
-		"mode": mode_value,
-		"min": clampf(_osc_param(node.get("min"), 0), 0.0, 1.0),
-		"max": clampf(_osc_param(node.get("max"), 1), 0.0, 1.0),
-		"sensitivity": _osc_param(node.get("sensitivity"), 1),
-		"_ast": node,
-	}
-	for param_name in ["name", "id"]:
-		if not node.has(param_name):
-			continue
-		var string_value = _resolve_automation_string(node[param_name], "midi", param_name)
-		if string_value != null:
-			v[param_name] = string_value
-	if node.has("_varRef"):
-		v["_varRef"] = node["_varRef"]
-	return v
+		var message := "%s() %s must resolve to a supported enum value" % [descriptor_name, field_name]
+		if descriptor_name == "audio" and field_name == "band":
+			message = "audio() band must resolve to an integer from 0 to 4 (got %s)" % _js_value_string(resolved)
+		_push_diag("S002", node, message)
+	return fallback
 
-func _resolve_audio_value(node: Dictionary) -> Dictionary:
-	var band_node = node.get("band")
-	var band_value = null
-	if band_node is Dictionary and band_node.get("type") == "Number":
-		band_value = band_node.get("value")
+func _reject_automation_number(code: String, node, message: String, fallback, options: Dictionary):
+	options["invalid"] = true
+	_push_diag(code, node, message)
+	return fallback
+
+func _resolve_automation_number(node, descriptor_name: String, field_name: String, fallback,
+		options: Dictionary = {}, depth: int = 0):
+	if node == null:
+		return fallback
+	var value = null
+	var node_type = node.get("type") if node is Dictionary else null
+	if node_type == "Number":
+		value = node.get("value")
+	elif options.get("allowBoolean", false) and node_type == "Boolean":
+		value = 1 if node.get("value") else 0
+	elif node_type == "Member" and options.get("allowMember", true):
+		value = _enum_num(_resolve_enum(node.get("path")))
+	elif AUTOMATION_FIELDS.has(node_type) and options.get("allowAutomation", false):
+		var compiled = _compile_automation_descriptor(node, depth + 1)
+		if compiled is Dictionary and compiled.get("_invalid", false):
+			options["invalid"] = true
+		return compiled
+	elif node_type == "String":
+		return _reject_automation_number("S001", node,
+			"String literal not allowed for %s() %s" % [descriptor_name, field_name], fallback, options)
+	elif node_type == "Ident":
+		return _reject_automation_number("S003", node,
+			"Undefined automation source '%s' for %s() %s" % [node.get("name"), descriptor_name, field_name], fallback, options)
 	else:
-		band_value = _enum_from_member_or_ident(band_node, "audioBand")
-	var valid_band: bool = (band_value is float or band_value is int) and floorf(float(band_value)) == float(band_value) and band_value >= 0 and band_value <= 4
-	if not valid_band:
-		if band_node is Dictionary and band_node.get("type") == "String":
-			_push_diag("S001", band_node, "String literal not allowed for audio() band; strings are only valid for audio.name and audio.id")
-		else:
-			_push_diag("S002", band_node, "audio() band must resolve to an integer from 0 to 4 (got %s)" % [_js_value_string(band_value)])
-	var min_value = _resolve_audio_number(node.get("min"), "min")
-	var max_value = _resolve_audio_number(node.get("max"), "max")
-	var valid_min: bool = not node.has("min") or min_value != null
-	var valid_max: bool = not node.has("max") or max_value != null
-	var channel_value = null
-	var valid_channel: bool = true
-	if node.has("channel"):
-		var channel_node = node["channel"]
-		if channel_node is Dictionary and channel_node.get("type") == "Number":
-			channel_value = channel_node.get("value")
-			valid_channel = (channel_value is float or channel_value is int) and floorf(float(channel_value)) == float(channel_value) and channel_value >= 1
-			if not valid_channel:
-				_push_diag("S002", channel_node, "audio() channel must be a positive integer (got %s)" % [_js_value_string(channel_value)])
-		else:
-			valid_channel = false
-			if channel_node is Dictionary and channel_node.get("type") == "String":
-				_push_diag("S001", channel_node, "String literal not allowed for audio() channel; strings are only valid for audio.name and audio.id")
+		return _reject_automation_number("S002", node,
+			"%s() %s must be a number%s" % [descriptor_name, field_name,
+				(" or automation source" if options.get("allowAutomation", false) else "")], fallback, options)
+
+	if not (value is float or value is int) or not is_finite(float(value)):
+		return _reject_automation_number("S002", node,
+			"%s() %s must resolve to a finite number" % [descriptor_name, field_name], fallback, options)
+	if options.get("integer", false) and floorf(float(value)) != float(value):
+		return _reject_automation_number("S002", node,
+			"%s() %s must be an integer" % [descriptor_name, field_name], fallback, options)
+	if options.has("min") and value < options["min"]:
+		return _reject_automation_number("S002", node,
+			"%s() %s must be at least %s (got %s)" % [descriptor_name, field_name,
+				_js_value_string(options["min"]), _js_value_string(value)], fallback, options)
+	if options.has("max") and value > options["max"]:
+		return _reject_automation_number("S002", node,
+			"%s() %s must be at most %s (got %s)" % [descriptor_name, field_name,
+				_js_value_string(options["max"]), _js_value_string(value)], fallback, options)
+	if options.get("clamp01", false):
+		return clampf(float(value), 0.0, 1.0)
+	return value
+
+func _compile_automation_descriptor(node: Dictionary, depth: int = 0):
+	if depth > MAX_AUTOMATION_DEPTH:
+		_push_diag("S001", node, "Automation nesting exceeds the maximum depth of %d" % MAX_AUTOMATION_DEPTH)
+		return 0
+
+	if node.get("type") == "Oscillator":
+		var value := {
+			"type": "Oscillator",
+			"oscType": _resolve_automation_enum(node.get("oscType"), "oscKind", 0,
+				[0, 1, 2, 3, 4, 5], "osc", "type"),
+			"min": _resolve_automation_number(node.get("min"), "osc", "min", 0,
+				{"allowBoolean": true, "allowAutomation": true, "clamp01": true}, depth),
+			"max": _resolve_automation_number(node.get("max"), "osc", "max", 1,
+				{"allowBoolean": true, "allowAutomation": true, "clamp01": true}, depth),
+			"speed": _resolve_automation_number(node.get("speed"), "osc", "speed", 1,
+				{"allowBoolean": true, "allowAutomation": true}, depth),
+			"offset": _resolve_automation_number(node.get("offset"), "osc", "offset", 0,
+				{"allowBoolean": true, "allowAutomation": true}, depth),
+			"seed": _resolve_automation_number(node.get("seed"), "osc", "seed", 1,
+				{"allowBoolean": true, "allowAutomation": true}, depth),
+			"_ast": node,
+		}
+		if node.has("_varRef"):
+			value["_varRef"] = node["_varRef"]
+		return value
+
+	if node.get("type") == "Midi":
+		var value := {
+			"type": "Midi",
+			"channel": _resolve_automation_number(node.get("channel"), "midi", "channel", 1,
+				{"allowBoolean": true}, depth),
+			"mode": _resolve_automation_enum(node.get("mode"), "midiMode", 4,
+				[0, 1, 2, 3, 4], "midi", "mode"),
+			"min": _resolve_automation_number(node.get("min"), "midi", "min", 0,
+				{"allowBoolean": true, "allowAutomation": true, "clamp01": true}, depth),
+			"max": _resolve_automation_number(node.get("max"), "midi", "max", 1,
+				{"allowBoolean": true, "allowAutomation": true, "clamp01": true}, depth),
+			"sensitivity": _resolve_automation_number(node.get("sensitivity"), "midi", "sensitivity", 1,
+				{"allowBoolean": true, "allowAutomation": true}, depth),
+			"_ast": node,
+		}
+		for field in ["name", "id"]:
+			if node.has(field):
+				var string_value = _resolve_automation_string(node[field], "midi", field)
+				if string_value != null:
+					value[field] = string_value
+		if node.has("_varRef"):
+			value["_varRef"] = node["_varRef"]
+		return value
+
+	if node.get("type") == "Audio":
+		var band = _resolve_automation_enum(node.get("band"), "audioBand", null,
+			[0, 1, 2, 3, 4], "audio", "band")
+		var min_options := {"allowAutomation": true, "allowMember": false, "clamp01": true}
+		var max_options := {"allowAutomation": true, "allowMember": false, "clamp01": true}
+		var min_value = _resolve_automation_number(node.get("min"), "audio", "min", 0, min_options, depth)
+		var max_value = _resolve_automation_number(node.get("max"), "audio", "max", 1, max_options, depth)
+		var channel = null
+		var valid_channel := true
+		if node.has("channel"):
+			var channel_node = node["channel"]
+			if channel_node is Dictionary and channel_node.get("type") == "Number" \
+					and floorf(float(channel_node.get("value"))) == float(channel_node.get("value")) \
+					and channel_node.get("value") >= 1:
+				channel = channel_node.get("value")
 			else:
-				_push_diag("S002", channel_node, "audio() channel must be a positive integer")
-	var name_value = _resolve_automation_string(node.get("name"), "audio", "name") if node.has("name") else null
-	var id_value = _resolve_automation_string(node.get("id"), "audio", "id") if node.has("id") else null
-	var valid_name: bool = not node.has("name") or name_value != null
-	var valid_id: bool = not node.has("id") or id_value != null
-	var v := {
-		"type": "Audio",
-		"min": clampf(float(min_value if min_value != null else 0), 0.0, 1.0),
-		"max": clampf(float(max_value if max_value != null else 1), 0.0, 1.0),
-		"_invalid": not (valid_band and valid_min and valid_max and valid_channel and valid_name and valid_id),
-		"_ast": node,
-	}
-	if valid_band:
-		v["band"] = band_value
-	if node.has("channel") and valid_channel:
-		v["channel"] = channel_value
-	if name_value != null:
-		v["name"] = name_value
-	if id_value != null:
-		v["id"] = id_value
-	if node.has("_varRef"):
-		v["_varRef"] = node["_varRef"]
-	return v
+				valid_channel = false
+				if channel_node is Dictionary and channel_node.get("type") == "String":
+					_push_diag("S001", channel_node, "String literal not allowed for audio() channel")
+				else:
+					var got = channel_node.get("value", channel_node.get("name", channel_node.get("type"))) \
+						if channel_node is Dictionary else null
+					_push_diag("S002", channel_node,
+						"audio() channel must be a positive integer (got %s)" % _js_value_string(got))
+		var name = _resolve_automation_string(node.get("name"), "audio", "name") if node.has("name") else null
+		var id = _resolve_automation_string(node.get("id"), "audio", "id") if node.has("id") else null
+		var value := {
+			"type": "Audio",
+			"min": min_value,
+			"max": max_value,
+			"_invalid": band == null or min_options.get("invalid", false) or max_options.get("invalid", false)
+				or not valid_channel or (node.has("name") and name == null) or (node.has("id") and id == null),
+			"_ast": node,
+		}
+		if band != null:
+			value["band"] = band
+		if channel != null:
+			value["channel"] = channel
+		if name != null:
+			value["name"] = name
+		if id != null:
+			value["id"] = id
+		if node.has("_varRef"):
+			value["_varRef"] = node["_varRef"]
+		return value
 
-func _resolve_audio_number(param, param_name: String):
-	if param == null:
-		return null
-	if param is Dictionary and param.get("type") == "Number":
-		return param.get("value")
-	if param is Dictionary and param.get("type") == "String":
-		_push_diag("S001", param, "String literal not allowed for audio() %s; strings are only valid for audio.name and audio.id" % [param_name])
-	else:
-		_push_diag("S002", param, "audio() %s must be a number" % [param_name])
-	return null
+	return 0
 
 func _resolve_automation_string(param, kind: String, param_name: String):
 	if param == null:
@@ -1201,34 +1283,3 @@ func _decode_json_string_literal_content(raw: String) -> String:
 		decoded += escapes[next] if escapes.has(next) else "\\" + next
 		i += 1
 	return decoded
-
-func _enum_from_member_or_ident(type_node, enum_head: String):
-	if type_node is Dictionary and type_node.get("type") == "Member":
-		var r = _resolve_enum(type_node.get("path"))
-		if r is float or r is int:
-			return r
-		if r is Dictionary and r.get("type") == "Number":
-			return r.get("value")
-	elif type_node is Dictionary and type_node.get("type") == "Ident":
-		var r = _resolve_enum([enum_head, type_node.get("name")])
-		if r is float or r is int:
-			return r
-		if r is Dictionary and r.get("type") == "Number":
-			return r.get("value")
-	return null
-
-func _osc_param(param, fallback):
-	if param == null or not (param is Dictionary):
-		return fallback
-	var t = param.get("type")
-	if t == "Number":
-		return param.get("value")
-	if t == "Boolean":
-		return 1 if param.get("value") else 0
-	if t == "Member":
-		var r = _resolve_enum(param.get("path"))
-		if r is float or r is int:
-			return r
-		if r is Dictionary and r.get("type") == "Number":
-			return r.get("value")
-	return fallback

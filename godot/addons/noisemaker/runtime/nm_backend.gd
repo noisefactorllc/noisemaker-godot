@@ -57,6 +57,40 @@ const ENGINE_SYNTH := {
 	"frame": {"slot": 2, "components": "z"},
 }
 
+const AUTOMATION_FIELD_RANGES := {
+	"unit": {"min": 0.0, "max": 1.0},
+	"oscillatorSpeed": {"min": -20.0, "max": 20.0},
+	"oscillatorOffset": {"min": -1.0, "max": 1.0},
+	"oscillatorSeed": {"min": 1.0, "max": 9999.0},
+	"midiSensitivity": {"min": 0.0, "max": 10.0},
+}
+const MAX_AUTOMATION_DEPTH := 8
+const INTEGRATION_RULES := [
+	{
+		"nodes": [-0.9894009349916499, -0.9445750230732326, -0.8656312023878318, -0.755404408355003,
+			-0.6178762444026438, -0.4580167776572274, -0.2816035507792589, -0.0950125098376374,
+			0.0950125098376374, 0.2816035507792589, 0.4580167776572274, 0.6178762444026438,
+			0.755404408355003, 0.8656312023878318, 0.9445750230732326, 0.9894009349916499],
+		"weights": [0.0271524594117541, 0.0622535239386479, 0.0951585116824928, 0.1246289712555339,
+			0.1495959888165767, 0.1691565193950025, 0.1826034150449236, 0.1894506104550685,
+			0.1894506104550685, 0.1826034150449236, 0.1691565193950025, 0.1495959888165767,
+			0.1246289712555339, 0.0951585116824928, 0.0622535239386479, 0.0271524594117541],
+	},
+	{
+		"nodes": [-0.9602898564975363, -0.7966664774136267, -0.525532409916329,
+			-0.1834346424956498, 0.1834346424956498, 0.525532409916329,
+			0.7966664774136267, 0.9602898564975363],
+		"weights": [0.1012285362903763, 0.2223810344533745, 0.3137066458778873,
+			0.362683783378362, 0.362683783378362, 0.3137066458778873,
+			0.2223810344533745, 0.1012285362903763],
+	},
+	{
+		"nodes": [-0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526],
+		"weights": [0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538],
+	},
+	{"nodes": [-0.5773502691896257, 0.5773502691896257], "weights": [1.0, 1.0]},
+]
+
 var rd: RenderingDevice
 var addon_dir: String
 var screen: Vector2i
@@ -100,6 +134,8 @@ var _state_node_re: RegEx  # matches particle state-node surface names (isStateS
 var _audio_waveform := PackedFloat32Array()
 var _audio_spectrum := PackedFloat32Array()
 var _audio_layouts := {}
+var _midi_state = null
+var _audio_state = null
 var _max_texture_size_2d := 0
 var _max_color_bytes_per_sample := 0
 
@@ -190,6 +226,12 @@ func set_audio_samples(waveform, spectrum) -> void:
 		_audio_spectrum.fill(0.0)
 		for i in range(min(128, spectrum.size())):
 			_audio_spectrum[i] = float(spectrum[i])
+
+func set_midi_state(state) -> void:
+	_midi_state = state
+
+func set_audio_state(state) -> void:
+	_audio_state = state
 
 func _ensure_audio_storage() -> void:
 	if _audio_waveform.size() != 128:
@@ -504,8 +546,9 @@ func _merge_uniforms(graph: Dictionary) -> Dictionary:
 	var out := {}
 	for p in graph.get("passes", []):
 		var u: Dictionary = p.get("uniforms", {})
+		var specs: Dictionary = p.get("uniformSpecs", {})
 		for k in u:
-			out[k] = u[k]
+			out[k] = resolve_uniform_value(u[k], _time, specs.get(k))
 	return out
 
 func _ensure_tex(tex_id: String) -> void:
@@ -760,7 +803,8 @@ func _load_effect_def(ns: String, fn: String) -> Dictionary:
 	var key := ns + "/" + fn
 	if _effect_defs.has(key):
 		return _effect_defs[key]
-	var path := addon_dir + "/effects/%s/%s.json" % [ns, fn]
+	var base_dir := addon_dir if not addon_dir.is_empty() else "res://addons/noisemaker"
+	var path := base_dir + "/effects/%s/%s.json" % [ns, fn]
 	var def := {}
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f:
@@ -865,6 +909,413 @@ func _comp_offsets(components: String) -> Array:
 		out.append(m[c])
 	return out
 
+func _finite_number(value) -> bool:
+	return (value is float or value is int) and is_finite(float(value))
+
+func _automation_type(value) -> String:
+	if not (value is Dictionary):
+		return ""
+	var kind := str(value.get("type", ""))
+	if kind in ["Oscillator", "Midi", "Audio"]:
+		return kind
+	var ast = value.get("_ast")
+	if ast is Dictionary:
+		kind = str(ast.get("type", ""))
+		if kind in ["Oscillator", "Midi", "Audio"]:
+			return kind
+	return ""
+
+func _is_automation_value(value) -> bool:
+	return _automation_type(value) != ""
+
+func _scale_automation_value(value: float, value_range) -> float:
+	if not (value_range is Dictionary) or not _finite_number(value_range.get("min")) \
+			or not _finite_number(value_range.get("max")):
+		return value
+	return float(value_range["min"]) + value * (float(value_range["max"]) - float(value_range["min"]))
+
+func _resolve_automation_field(value, normalized_time: float, value_range: Dictionary,
+		depth: int, fallback: float, wall_time: float, stack: Array) -> float:
+	if _is_automation_value(value):
+		return _evaluate_automation(value, normalized_time, value_range, depth + 1, wall_time, stack)
+	return float(value) if _finite_number(value) else fallback
+
+func _has_dynamic_automation_fields(config: Dictionary) -> bool:
+	var fields := ["min", "max", "sensitivity"] if _automation_type(config) == "Midi" else ["min", "max"]
+	for field in fields:
+		if _is_automation_value(config.get(field)):
+			return true
+	return false
+
+func _osc_sine(t: float) -> float:
+	return (1.0 - cos(t * TAU)) * 0.5
+
+func _osc_tri(t: float) -> float:
+	var fraction: float = t - floor(t)
+	return 1.0 - abs(fraction * 2.0 - 1.0)
+
+func _osc_saw(t: float) -> float:
+	return t - floor(t)
+
+func _osc_saw_inverse(t: float) -> float:
+	return 1.0 - (t - floor(t))
+
+func _osc_square(t: float) -> float:
+	return 1.0 if t - floor(t) >= 0.5 else 0.0
+
+func _automation_hash21(px: float, py: float, seed: float) -> float:
+	var x := fmod(px * 234.34 + seed, 1.0)
+	var y := fmod(py * 435.345 + seed, 1.0)
+	if x < 0.0:
+		x += 1.0
+	if y < 0.0:
+		y += 1.0
+	var p := x + y + (x + y) * 34.23
+	return fmod(x * y * p, 1.0)
+
+func _automation_noise2d(px: float, py: float, seed: float) -> float:
+	var ix := floor(px)
+	var iy := floor(py)
+	var fx: float = px - ix
+	var fy: float = py - iy
+	fx = fx * fx * (3.0 - 2.0 * fx)
+	fy = fy * fy * (3.0 - 2.0 * fy)
+	var a := _automation_hash21(ix, iy, seed)
+	var b := _automation_hash21(ix + 1.0, iy, seed)
+	var c := _automation_hash21(ix, iy + 1.0, seed)
+	var d := _automation_hash21(ix + 1.0, iy + 1.0, seed)
+	return a * (1.0 - fx) * (1.0 - fy) + b * fx * (1.0 - fy) \
+		+ c * (1.0 - fx) * fy + d * fx * fy
+
+func _osc_noise(t: float, seed: float) -> float:
+	var angle := fmod(t, 1.0) * TAU
+	var loop_x := cos(angle) * 2.0
+	var loop_y := sin(angle) * 2.0
+	var first := _automation_noise2d(loop_x + seed, loop_y + seed, seed)
+	var second := _automation_noise2d(loop_x + seed * 2.0, loop_y + seed * 2.0, seed)
+	return (first + second) * 0.5
+
+func _osc_primitive(kind: int, x: float):
+	var whole := floor(x)
+	var fraction: float = x - whole
+	match kind:
+		0:
+			return x * 0.5 - sin(x * TAU) / (2.0 * TAU)
+		1:
+			var partial: float = fraction * fraction if fraction < 0.5 \
+				else 2.0 * fraction - fraction * fraction - 0.5
+			return whole * 0.5 + partial
+		2:
+			return whole * 0.5 + fraction * fraction * 0.5
+		3:
+			return x - (whole * 0.5 + fraction * fraction * 0.5)
+		4:
+			return whole * 0.5 + max(0.0, fraction - 0.5)
+	return null
+
+func _can_integrate_oscillator_exactly(config: Dictionary) -> bool:
+	var kind = config.get("oscType")
+	if not _finite_number(kind) or kind < 0 or kind > 4:
+		return false
+	for field in ["min", "max", "speed", "offset", "seed"]:
+		if not _finite_number(config.get(field)):
+			return false
+	return true
+
+func _integrate_simple_oscillator(config: Dictionary, normalized_time: float, wall_time: float) -> float:
+	var speed := float(config.get("speed"))
+	if speed == 0.0:
+		return _evaluate_oscillator(config, 0.0, 0, wall_time, []) * normalized_time
+	var start = _osc_primitive(int(config.get("oscType")), float(config.get("offset")))
+	var finish = _osc_primitive(int(config.get("oscType")),
+		float(config.get("offset")) + speed * normalized_time)
+	var raw_integral: float = (finish - start) / speed
+	return float(config.get("min")) * normalized_time \
+		+ (float(config.get("max")) - float(config.get("min"))) * raw_integral
+
+func _integrate_automation(config: Dictionary, normalized_time: float, value_range: Dictionary,
+		depth: int, wall_time: float, stack: Array) -> float:
+	var integral: float
+	var kind := _automation_type(config)
+	if kind == "Oscillator" and _can_integrate_oscillator_exactly(config):
+		integral = _integrate_simple_oscillator(config, normalized_time, wall_time)
+	elif (kind == "Midi" or kind == "Audio") and not _has_dynamic_automation_fields(config):
+		integral = _evaluate_automation(config, normalized_time, null, depth + 1, wall_time, stack) * normalized_time
+	else:
+		var rule: Dictionary = INTEGRATION_RULES[min(depth, INTEGRATION_RULES.size() - 1)]
+		var midpoint := normalized_time * 0.5
+		var half_width := normalized_time * 0.5
+		var total := 0.0
+		for i in range(rule["nodes"].size()):
+			var sample_time: float = midpoint + half_width * float(rule["nodes"][i])
+			total += float(rule["weights"][i]) * _evaluate_automation(
+				config, sample_time, null, depth + 1, wall_time, stack)
+		integral = half_width * total
+	if value_range is Dictionary and _finite_number(value_range.get("min")) \
+			and _finite_number(value_range.get("max")):
+		return float(value_range["min"]) * normalized_time \
+			+ integral * (float(value_range["max"]) - float(value_range["min"]))
+	return integral
+
+func _state_field(state, field: String, fallback = 0.0):
+	if state is Dictionary:
+		return state.get(field, fallback)
+	if state is Object:
+		var value = state.get(field)
+		return fallback if value == null else value
+	return fallback
+
+func _selected_midi_state(config: Dictionary):
+	if _midi_state == null:
+		return null
+	var has_selector := config.has("name") or config.has("id")
+	if not has_selector:
+		return _midi_state
+	if _midi_state is Object:
+		for method in ["get_port_state", "getPortState"]:
+			if _midi_state.has_method(method):
+				return _midi_state.call(method, config)
+	if not (_midi_state is Dictionary) or not (_midi_state.get("ports") is Dictionary):
+		return null
+	var ports: Dictionary = _midi_state["ports"]
+	if config.has("id"):
+		var entry = ports.get(config["id"])
+		return entry.get("state") if entry is Dictionary and entry.get("connected", true) else null
+	var matched_state = null
+	for entry in ports.values():
+		if entry is Dictionary and entry.get("connected", true) and entry.get("name") == config.get("name"):
+			if matched_state != null:
+				return null
+			matched_state = entry.get("state")
+	return matched_state
+
+func _midi_channel(state, channel_number: int):
+	if state is Object:
+		for method in ["get_channel", "getChannel"]:
+			if state.has_method(method):
+				return state.call(method, channel_number)
+	if state is Dictionary and state.get("channels") is Dictionary:
+		var channels: Dictionary = state["channels"]
+		return channels.get(channel_number, channels.get(str(channel_number),
+			channels.get(1, channels.get("1", {}))))
+	return null
+
+func _evaluate_midi(config: Dictionary, midi_state, wall_time: float,
+		minimum: float, maximum: float, sensitivity: float) -> float:
+	if midi_state == null:
+		return minimum
+	var channel = _midi_channel(midi_state, int(config.get("channel", 1)))
+	if channel == null:
+		return minimum
+	var raw_value := 0.0
+	var gate := float(_state_field(channel, "gate", 0.0))
+	match int(config.get("mode", 4)):
+		0:
+			raw_value = float(_state_field(channel, "key", 0.0))
+		1:
+			if gate == 1.0:
+				raw_value = float(_state_field(channel, "key", 0.0))
+		2:
+			if gate == 1.0:
+				raw_value = float(_state_field(channel, "velocity", 0.0))
+		3:
+			if gate == 1.0:
+				raw_value = float(_state_field(channel, "key", 0.0))
+				var decay := min(1.0, (wall_time - float(_state_field(channel, "time", 0.0))) \
+					* sensitivity * 0.001)
+				raw_value *= 1.0 - decay
+		_:
+			if gate == 1.0:
+				raw_value = float(_state_field(channel, "velocity", 0.0))
+				var decay := min(1.0, (wall_time - float(_state_field(channel, "time", 0.0))) \
+					* sensitivity * 0.001)
+				raw_value *= 1.0 - decay
+	return minimum + raw_value / 127.0 * (maximum - minimum)
+
+func _selected_audio_state(config: Dictionary):
+	if _audio_state == null:
+		return null
+	var has_selector := config.has("name") or config.has("id") or config.has("channel")
+	if not has_selector:
+		return _audio_state
+	if _audio_state is Object:
+		for method in ["get_device_channel_state", "getDeviceChannelState"]:
+			if _audio_state.has_method(method):
+				return _audio_state.call(method, config)
+	if not (_audio_state is Dictionary) or not (_audio_state.get("devices") is Dictionary):
+		return null
+	var devices: Dictionary = _audio_state["devices"]
+	var entry = devices.get(config.get("id")) if config.has("id") else null
+	if not config.has("id") and config.has("name"):
+		for candidate in devices.values():
+			if candidate is Dictionary and candidate.get("connected", true) \
+					and candidate.get("name") == config.get("name"):
+				if entry != null:
+					return null
+				entry = candidate
+	if not (entry is Dictionary) or not entry.get("connected", true):
+		return null
+	var channels = entry.get("channels")
+	if channels is Dictionary:
+		return channels.get(config.get("channel"), channels.get(str(config.get("channel"))))
+	return null
+
+func _evaluate_audio(config: Dictionary, audio_state, minimum: float, maximum: float) -> float:
+	if config.get("_invalid", false) or audio_state == null:
+		return minimum
+	var raw_value := 0.0
+	match int(config.get("band", -1)):
+		0:
+			raw_value = float(_state_field(audio_state, "low", 0.0))
+		1:
+			raw_value = float(_state_field(audio_state, "mid", 0.0))
+		2:
+			raw_value = float(_state_field(audio_state, "high", 0.0))
+		3:
+			raw_value = float(_state_field(audio_state, "vol", 0.0))
+		4:
+			if _state_field(audio_state, "rawReady", false) != true \
+					and _state_field(audio_state, "raw_ready", false) != true:
+				return minimum
+			raw_value = (clampf(float(_state_field(audio_state, "raw", 0.0)), -1.0, 1.0) + 1.0) * 0.5
+	return minimum + clampf(raw_value, 0.0, 1.0) * (maximum - minimum)
+
+func _evaluate_oscillator(config: Dictionary, normalized_time: float, depth: int,
+		wall_time: float, stack: Array) -> float:
+	var minimum := _resolve_automation_field(config.get("min"), normalized_time,
+		AUTOMATION_FIELD_RANGES["unit"], depth, 0.0, wall_time, stack)
+	var maximum := _resolve_automation_field(config.get("max"), normalized_time,
+		AUTOMATION_FIELD_RANGES["unit"], depth, 1.0, wall_time, stack)
+	var offset := _resolve_automation_field(config.get("offset"), normalized_time,
+		AUTOMATION_FIELD_RANGES["oscillatorOffset"], depth, 0.0, wall_time, stack)
+	var seed := _resolve_automation_field(config.get("seed"), normalized_time,
+		AUTOMATION_FIELD_RANGES["oscillatorSeed"], depth, 1.0, wall_time, stack)
+	var speed = config.get("speed")
+	var phase := _integrate_automation(speed, normalized_time,
+		AUTOMATION_FIELD_RANGES["oscillatorSpeed"], depth, wall_time, stack) \
+		if speed is Dictionary and _is_automation_value(speed) \
+		else normalized_time * (float(speed) if _finite_number(speed) else 1.0)
+	var t := phase + offset
+	var raw_value := 0.0
+	match int(config.get("oscType", -1)):
+		0:
+			raw_value = _osc_sine(t)
+		1:
+			raw_value = _osc_tri(t)
+		2:
+			raw_value = _osc_saw(t)
+		3:
+			raw_value = _osc_saw_inverse(t)
+		4:
+			raw_value = _osc_square(t)
+		5:
+			raw_value = _osc_noise(t, seed)
+	return minimum + raw_value * (maximum - minimum)
+
+func _automation_stack_has(stack: Array, config: Dictionary) -> bool:
+	for active in stack:
+		if is_same(active, config):
+			return true
+	return false
+
+func _evaluate_automation(config: Dictionary, normalized_time: float, value_range = null,
+		depth: int = 0, wall_time: float = -1.0, stack: Array = []) -> float:
+	if not _is_automation_value(config) or depth > MAX_AUTOMATION_DEPTH \
+			or _automation_stack_has(stack, config):
+		return _scale_automation_value(0.0, value_range)
+	if wall_time < 0.0:
+		wall_time = float(Time.get_ticks_msec())
+	stack.push_back(config)
+	var value := 0.0
+	match _automation_type(config):
+		"Oscillator":
+			value = _evaluate_oscillator(config, normalized_time, depth, wall_time, stack)
+		"Midi":
+			var minimum := _resolve_automation_field(config.get("min"), normalized_time,
+				AUTOMATION_FIELD_RANGES["unit"], depth, 0.0, wall_time, stack)
+			var maximum := _resolve_automation_field(config.get("max"), normalized_time,
+				AUTOMATION_FIELD_RANGES["unit"], depth, 1.0, wall_time, stack)
+			var sensitivity := _resolve_automation_field(config.get("sensitivity"), normalized_time,
+				AUTOMATION_FIELD_RANGES["midiSensitivity"], depth, 1.0, wall_time, stack)
+			value = _evaluate_midi(config, _selected_midi_state(config), wall_time,
+				minimum, maximum, sensitivity)
+		"Audio":
+			if config.get("_invalid", false):
+				value = float(config.get("min")) if _finite_number(config.get("min")) else 0.0
+			else:
+				var minimum := _resolve_automation_field(config.get("min"), normalized_time,
+					AUTOMATION_FIELD_RANGES["unit"], depth, 0.0, wall_time, stack)
+				var maximum := _resolve_automation_field(config.get("max"), normalized_time,
+					AUTOMATION_FIELD_RANGES["unit"], depth, 1.0, wall_time, stack)
+				value = _evaluate_audio(config, _selected_audio_state(config), minimum, maximum)
+	stack.pop_back()
+	return _scale_automation_value(value, value_range)
+
+func resolve_uniform_value(value, normalized_time: float, param_spec = null):
+	if not _is_automation_value(value):
+		return value
+	return _evaluate_automation(value, normalized_time, param_spec)
+
+func _visit_audio_requirements(value, result: Dictionary, selected_keys: Dictionary,
+		depth: int = 0) -> void:
+	if depth > 64:
+		return
+	if value is Dictionary and _automation_type(value) == "Audio":
+		var source = value.get("_ast")
+		if not (source is Dictionary) or source.get("type") != "Audio":
+			source = value
+		var has_selector_intent: bool = value.has("name") or value.has("id") or value.has("channel") \
+			or source.has("name") or source.has("id") or source.has("channel")
+		var band = value.get("band")
+		var has_valid_band: bool = not value.get("_invalid", false) and _finite_number(band) \
+			and floorf(float(band)) == float(band) and band >= 0 and band <= 4
+		if not has_valid_band:
+			return
+		_visit_audio_requirements(value.get("min"), result, selected_keys, depth + 1)
+		_visit_audio_requirements(value.get("max"), result, selected_keys, depth + 1)
+		if value.get("name") is String and not str(value.get("name")).is_empty() \
+				and _finite_number(value.get("channel")) \
+				and floorf(float(value.get("channel"))) == float(value.get("channel")) \
+				and value.get("channel") >= 1:
+			var requirement := {
+				"id": value.get("id") if value.get("id") is String and not str(value.get("id")).is_empty() else null,
+				"name": value.get("name"),
+				"channel": value.get("channel"),
+				"needsRaw": int(band) == 4,
+			}
+			var key := JSON.stringify([requirement["id"], requirement["name"], requirement["channel"]])
+			if selected_keys.has(key):
+				var index: int = selected_keys[key]
+				if requirement["needsRaw"]:
+					result["selected"][index]["needsRaw"] = true
+			else:
+				selected_keys[key] = result["selected"].size()
+				result["selected"].append(requirement)
+		elif not has_selector_intent:
+			result["needsLegacy"] = true
+			if int(band) == 4:
+				result["needsLegacyRaw"] = true
+		return
+	if value is Array:
+		for item in value:
+			_visit_audio_requirements(item, result, selected_keys, depth + 1)
+	elif value is Dictionary:
+		for key in value:
+			if key != "_ast":
+				_visit_audio_requirements(value[key], result, selected_keys, depth + 1)
+
+func get_audio_input_requirements(graph: Dictionary) -> Dictionary:
+	var result := {"needsLegacy": false, "needsLegacyRaw": false, "selected": []}
+	var selected_keys := {}
+	for pass_data in graph.get("passes", []):
+		if pass_data is Dictionary:
+			var effect_def := _load_effect_def(str(pass_data.get("namespace", "")),
+				str(pass_data.get("func", "")))
+			if effect_def.get("tags") is Array and effect_def["tags"].has("audio"):
+				result["needsLegacy"] = true
+			_visit_audio_requirements(pass_data.get("uniforms", {}), result, selected_keys)
+	return result
+
 func _value_floats(v) -> Array:
 	if typeof(v) == TYPE_BOOL:
 		return [1.0 if v else 0.0]
@@ -915,6 +1366,7 @@ func pack_with_layout(layout: Dictionary, globals: Dictionary, p: Dictionary) ->
 	var data := PackedFloat32Array()
 	data.resize((max_slot + 1) * 4)
 	var pass_u: Dictionary = p.get("uniforms", {})
+	var uniform_specs: Dictionary = p.get("uniformSpecs", {})
 	for name in layout:
 		var slot := int(layout[name]["slot"])
 		var offs := _comp_offsets(str(layout[name]["components"]))
@@ -924,7 +1376,7 @@ func pack_with_layout(layout: Dictionary, globals: Dictionary, p: Dictionary) ->
 		elif ENGINE_GLOBALS.has(name):
 			vals = _engine_value(name)
 		elif pass_u.has(name):
-			vals = _value_floats(pass_u[name])
+			vals = _value_floats(resolve_uniform_value(pass_u[name], _time, uniform_specs.get(name)))
 		else:
 			var default_value = _default_for_uniform(globals, str(name))
 			vals = _value_floats(default_value) if default_value != null else [0.0]

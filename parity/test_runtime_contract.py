@@ -259,6 +259,163 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("AUDIO_PACK_TEST: PASS", result.stdout, result.stdout + result.stderr)
 
+    def test_nested_oscillator_uniform_is_seekable_and_scaled_when_packed(self):
+        script = """
+            extends SceneTree
+
+            func _init() -> void:
+                var backend_script = load("res://addons/noisemaker/runtime/nm_backend.gd")
+                var backend = backend_script.new()
+                if not backend.has_method("resolve_uniform_value"):
+                    print("NESTED_AUTOMATION_TEST: missing runtime automation resolver")
+                    quit(1)
+                    return
+                var rate := {
+                    "type": "Oscillator", "oscType": 0,
+                    "min": 0.0, "max": 1.0, "speed": 1.0, "offset": 0.0, "seed": 1.0,
+                }
+                var carrier := {
+                    "type": "Oscillator", "oscType": 2,
+                    "min": 0.0, "max": 1.0, "speed": rate, "offset": 0.0, "seed": 1.0,
+                }
+                var quarter = backend.call("resolve_uniform_value", carrier, 0.25, {"min": 2.0, "max": 6.0})
+                var later = backend.call("resolve_uniform_value", carrier, 0.75, null)
+                backend.call("resolve_uniform_value", carrier, 0.12, null)
+                var repeated = backend.call("resolve_uniform_value", carrier, 0.75, null)
+                var expected_quarter = 2.0 + 4.0 * fposmod(-20.0 / TAU, 1.0)
+                var expected_later = fposmod(20.0 / TAU, 1.0)
+                var layout := {"amount": {"slot": 0, "components": "x"}}
+                var pass_data := {
+                    "uniforms": {"amount": carrier},
+                    "uniformSpecs": {"amount": {"min": 2.0, "max": 6.0}},
+                }
+                backend.set("_time", 0.25)
+                var packed: PackedByteArray = backend.call("pack_with_layout", layout, {}, pass_data)
+                var packed_amount = packed.to_float32_array()[0]
+                var ok: bool = abs(quarter - expected_quarter) <= 1e-8 \
+                    and abs(later - expected_later) <= 1e-8 \
+                    and repeated == later \
+                    and abs(packed_amount - expected_quarter) <= 1e-6
+                if ok:
+                    print("NESTED_AUTOMATION_TEST: PASS")
+                    quit(0)
+                else:
+                    print("NESTED_AUTOMATION_TEST: quarter=", quarter, " later=", later,
+                        " repeated=", repeated, " packed=", packed_amount)
+                    quit(1)
+        """
+        result = self._run_godot_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NESTED_AUTOMATION_TEST: PASS", result.stdout, result.stdout + result.stderr)
+
+    def test_external_inputs_drive_nested_rate_and_capture_requirements_recurse(self):
+        script = """
+            extends SceneTree
+
+            func oscillator(kind: int, speed) -> Dictionary:
+                return {
+                    "type": "Oscillator", "oscType": kind,
+                    "min": 0.0, "max": 1.0, "speed": speed, "offset": 0.0, "seed": 1.0,
+                }
+
+            func _init() -> void:
+                var backend = load("res://addons/noisemaker/runtime/nm_backend.gd").new()
+                if not backend.has_method("get_audio_input_requirements"):
+                    print("EXTERNAL_AUTOMATION_TEST: missing capture requirements")
+                    quit(1)
+                    return
+                var midi_rate := {
+                    "type": "Midi", "channel": 1, "mode": 2,
+                    "min": 0.0, "max": 1.0, "sensitivity": 1.0,
+                }
+                var audio_rate := {
+                    "type": "Audio", "band": 4,
+                    "min": 0.0, "max": 1.0, "_invalid": false,
+                }
+                backend.call("set_midi_state", {
+                    "channels": {1: {"key": 60, "velocity": 127, "gate": 1, "time": 0}},
+                })
+                backend.call("set_audio_state", {"raw": 1.0, "rawReady": true})
+                var midi_forward = backend.call("resolve_uniform_value", oscillator(2, midi_rate), 0.0125, null)
+                var audio_forward = backend.call("resolve_uniform_value", oscillator(2, audio_rate), 0.0125, null)
+                backend.call("set_midi_state", {
+                    "channels": {1: {"key": 60, "velocity": 0, "gate": 1, "time": 0}},
+                })
+                backend.call("set_audio_state", {"raw": -1.0, "rawReady": true})
+                var midi_reverse = backend.call("resolve_uniform_value", oscillator(2, midi_rate), 0.0125, null)
+                var audio_reverse = backend.call("resolve_uniform_value", oscillator(2, audio_rate), 0.0125, null)
+
+                var inner := {
+                    "type": "Audio", "band": 4, "min": 0.0, "max": 1.0, "_invalid": false,
+                    "channel": 2, "name": "Inner Interface", "id": "inner-id",
+                }
+                var outer := {
+                    "type": "Audio", "band": 0, "min": inner, "max": 1.0, "_invalid": false,
+                    "channel": 1, "name": "Outer Interface", "id": "outer-id",
+                }
+                var requirements: Dictionary = backend.call("get_audio_input_requirements", {
+                    "passes": [
+                        {"uniforms": {"amount": outer}},
+                        {
+                            "effectKey": "synth.scope", "namespace": "synth", "func": "scope",
+                            "uniforms": {},
+                        },
+                    ],
+                })
+                var ids := []
+                for requirement in requirements["selected"]:
+                    ids.append(requirement["id"])
+                ids.sort()
+                var invalid_outer := {
+                    "type": "Audio", "band": 0, "min": inner, "max": 1.0, "_invalid": true,
+                }
+                var invalid_requirements: Dictionary = backend.call("get_audio_input_requirements", {
+                    "passes": [{"uniforms": {"amount": invalid_outer}}],
+                })
+                var invalid_value = backend.call("resolve_uniform_value", invalid_outer, 0.5, null)
+
+                backend.call("set_audio_state", {
+                    "devices": {
+                        "actual-id": {
+                            "name": "Shared Name", "connected": true,
+                            "channels": {1: {"low": 0.8}},
+                        },
+                    },
+                })
+                var missing_id := {
+                    "type": "Audio", "band": 0, "min": 0.0, "max": 1.0, "_invalid": false,
+                    "channel": 1, "name": "Shared Name", "id": "missing-id",
+                }
+                var missing_id_value = backend.call("resolve_uniform_value", missing_id, 0.5, null)
+                var cyclic := oscillator(0, 1.0)
+                cyclic["speed"] = cyclic
+                var cyclic_value = backend.call("resolve_uniform_value", cyclic, 0.25, null)
+                var ok: bool = abs(midi_forward - 0.25) <= 1e-8 \
+                    and abs(audio_forward - 0.25) <= 1e-8 \
+                    and abs(midi_reverse - 0.75) <= 1e-8 \
+                    and abs(audio_reverse - 0.75) <= 1e-8 \
+                    and ids == ["inner-id", "outer-id"] \
+                    and requirements["needsLegacy"] \
+                    and invalid_requirements["selected"].is_empty() \
+                    and invalid_value == 0.0 \
+                    and missing_id_value == 0.0 \
+                    and cyclic_value == 0.0
+                if ok:
+                    print("EXTERNAL_AUTOMATION_TEST: PASS")
+                    quit(0)
+                else:
+                    print("EXTERNAL_AUTOMATION_TEST: midi=", midi_forward, "/", midi_reverse,
+                        " audio=", audio_forward, "/", audio_reverse, " ids=", ids,
+                        " invalid=", invalid_requirements, "/", invalid_value,
+                        " missing-id=", missing_id_value, " cyclic=", cyclic_value)
+                    quit(1)
+        """
+        result = self._run_godot_script(script)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("EXTERNAL_AUTOMATION_TEST: PASS", result.stdout, result.stdout + result.stderr)
+
     def test_blend_factor_names_accept_definition_json_casing(self):
         script = """
             extends SceneTree

@@ -177,6 +177,57 @@ class CompilerAutomationTests(unittest.TestCase):
             self.assertTrue(config["_invalid"], name)
             self.assertNotIn(invalid_field, config, name)
 
+    def test_nested_automation_sources_survive_validation(self):
+        source = """
+            search synth
+            let rate = audio(band: audioBand.raw, min: 0.25, max: 0.75)
+            let carrier = osc(type: oscKind.saw, min: rate, speed: rate)
+            noise(scaleX: carrier).write(o0)
+            render(o0)
+        """
+        output = self._dump("_validate_dump.gd", {"nested.dsl": source})["nested.dsl"]
+
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["out"]["diagnostics"], [])
+        carrier = output["out"]["plans"][0]["chain"][0]["args"]["scaleX"]
+        self.assertEqual(carrier["type"], "Oscillator")
+        self.assertEqual(carrier["oscType"], 2)
+        for field in ("min", "speed"):
+            self.assertEqual(carrier[field]["type"], "Audio")
+            self.assertEqual(carrier[field]["_varRef"], "rate")
+
+    def test_automation_cycles_and_excess_depth_are_reported(self):
+        programs = {
+            "cycle.dsl": """
+                search synth
+                let first = osc(type: oscKind.sine, speed: second)
+                let second = osc(type: oscKind.tri, speed: first)
+                noise(scaleX: first).write(o0)
+                render(o0)
+            """,
+            "depth.dsl": """
+                search synth
+                let rate9 = osc(type: oscKind.sine)
+                let rate8 = osc(type: oscKind.sine, speed: rate9)
+                let rate7 = osc(type: oscKind.sine, speed: rate8)
+                let rate6 = osc(type: oscKind.sine, speed: rate7)
+                let rate5 = osc(type: oscKind.sine, speed: rate6)
+                let rate4 = osc(type: oscKind.sine, speed: rate5)
+                let rate3 = osc(type: oscKind.sine, speed: rate4)
+                let rate2 = osc(type: oscKind.sine, speed: rate3)
+                let rate1 = osc(type: oscKind.sine, speed: rate2)
+                let carrier = osc(type: oscKind.saw, speed: rate1)
+                noise(scaleX: carrier).write(o0)
+                render(o0)
+            """,
+        }
+        outputs = self._dump("_validate_dump.gd", programs)
+
+        cycle_messages = [item["message"] for item in outputs["cycle.dsl"]["out"]["diagnostics"]]
+        depth_messages = [item["message"] for item in outputs["depth.dsl"]["out"]["diagnostics"]]
+        self.assertTrue(any("cycle" in message.lower() for message in cycle_messages), cycle_messages)
+        self.assertTrue(any("maximum depth of 8" in message for message in depth_messages), depth_messages)
+
 
 if __name__ == "__main__":
     unittest.main()
