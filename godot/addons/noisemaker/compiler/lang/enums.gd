@@ -99,7 +99,7 @@ func _build_std() -> Dictionary:
 		"noteChange": leaf(0), "gateNote": leaf(1), "gateVelocity": leaf(2),
 		"triggerNote": leaf(3), "velocity": leaf(4),
 	}
-	root["audioBand"] = {"low": leaf(0), "mid": leaf(1), "high": leaf(2), "vol": leaf(3)}
+	root["audioBand"] = {"low": leaf(0), "mid": leaf(1), "high": leaf(2), "vol": leaf(3), "raw": leaf(4)}
 	var palette := {}
 	for idx in range(PALETTE_KEYS.size()):
 		palette[PALETTE_KEYS[idx]] = leaf(idx)

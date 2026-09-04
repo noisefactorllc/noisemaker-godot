@@ -133,11 +133,18 @@ func _transform_osc(call: Dictionary, name_token) -> Dictionary:
 		"loc": {"line": name_token.line, "col": name_token.col},
 	}
 
-# midi(channel, mode?, min?, max?, sensitivity?) -> Midi node.
+# midi(channel, mode?, min?, max?, sensitivity?, name:?, id:?) -> Midi node.
 func _transform_midi(call: Dictionary, name_token) -> Dictionary:
 	var args: Array = call.get("args", []) if call.get("args") is Array else []
 	var kwargs: Dictionary = call.get("kwargs", {})
 	var param_order := ["channel", "mode", "min", "max", "sensitivity"]
+	var keyword_only_params := ["name", "id"]
+	var valid_params := param_order + keyword_only_params
+	if args.size() > param_order.size():
+		_fail("midi() name and id are keyword-only at line %d col %d" % [name_token.line, name_token.col])
+	for key in kwargs.keys():
+		if not valid_params.has(key):
+			_fail("midi() unknown parameter '%s' at line %d col %d. Valid: %s" % [key, name_token.line, name_token.col, ", ".join(valid_params)])
 	var defaults := {
 		"mode": {"type": "Member", "path": ["midiMode", "velocity"]},
 		"min": {"type": "Number", "value": 0},
@@ -145,17 +152,31 @@ func _transform_midi(call: Dictionary, name_token) -> Dictionary:
 		"sensitivity": {"type": "Number", "value": 1},
 	}
 	var resolved := {}
+	var pos_cursor := 0
 	for i in range(param_order.size()):
 		var pname: String = param_order[i]
 		if kwargs.has(pname):
 			resolved[pname] = kwargs[pname]
-		elif i < args.size():
-			resolved[pname] = args[i]
+		elif pos_cursor < args.size():
+			resolved[pname] = args[pos_cursor]
+			pos_cursor += 1
 		elif defaults.has(pname):
 			resolved[pname] = defaults[pname]
+	if pos_cursor < args.size():
+		_fail("midi() has an excess positional argument at line %d col %d" % [name_token.line, name_token.col])
 	if not resolved.has("channel") or resolved.get("channel") == null:
 		_fail("midi() requires 'channel' argument at line %d col %d" % [name_token.line, name_token.col])
-	return {
+	if kwargs.has("id") and not kwargs.has("name"):
+		_fail("midi() 'id' requires readable 'name' at line %d col %d" % [name_token.line, name_token.col])
+	for pname in keyword_only_params:
+		if not kwargs.has(pname):
+			continue
+		var value = kwargs[pname]
+		if not (value is Dictionary) or value.get("type") != "String":
+			_fail("midi() '%s' requires a quoted string at line %d col %d" % [pname, name_token.line, name_token.col])
+		elif str(value.get("value", "")).is_empty():
+			_fail("midi() '%s' must not be empty at line %d col %d" % [pname, name_token.line, name_token.col])
+	var node := {
 		"type": "Midi",
 		"channel": resolved.get("channel"),
 		"mode": resolved.get("mode"),
@@ -164,34 +185,65 @@ func _transform_midi(call: Dictionary, name_token) -> Dictionary:
 		"sensitivity": resolved.get("sensitivity"),
 		"loc": {"line": name_token.line, "col": name_token.col},
 	}
+	for pname in keyword_only_params:
+		if kwargs.has(pname):
+			node[pname] = kwargs[pname]
+	return node
 
-# audio(band, min?, max?) -> Audio node.
+# audio(band, min?, max?, channel:?, name:?, id:?) -> Audio node.
 func _transform_audio(call: Dictionary, name_token) -> Dictionary:
 	var args: Array = call.get("args", []) if call.get("args") is Array else []
 	var kwargs: Dictionary = call.get("kwargs", {})
 	var param_order := ["band", "min", "max"]
+	var keyword_only_params := ["channel", "name", "id"]
+	var valid_params := param_order + keyword_only_params
+	if args.size() > param_order.size():
+		_fail("audio() channel, name and id are keyword-only at line %d col %d" % [name_token.line, name_token.col])
+	for key in kwargs.keys():
+		if not valid_params.has(key):
+			_fail("audio() unknown parameter '%s' at line %d col %d. Valid: %s" % [key, name_token.line, name_token.col, ", ".join(valid_params)])
 	var defaults := {
 		"min": {"type": "Number", "value": 0},
 		"max": {"type": "Number", "value": 1},
 	}
 	var resolved := {}
+	var pos_cursor := 0
 	for i in range(param_order.size()):
 		var pname: String = param_order[i]
 		if kwargs.has(pname):
 			resolved[pname] = kwargs[pname]
-		elif i < args.size():
-			resolved[pname] = args[i]
+		elif pos_cursor < args.size():
+			resolved[pname] = args[pos_cursor]
+			pos_cursor += 1
 		elif defaults.has(pname):
 			resolved[pname] = defaults[pname]
+	if pos_cursor < args.size():
+		_fail("audio() has an excess positional argument at line %d col %d" % [name_token.line, name_token.col])
 	if not resolved.has("band") or resolved.get("band") == null:
 		_fail("audio() requires 'band' argument at line %d col %d" % [name_token.line, name_token.col])
-	return {
+	if kwargs.has("id") and not kwargs.has("name"):
+		_fail("audio() 'id' requires readable 'name' at line %d col %d" % [name_token.line, name_token.col])
+	if kwargs.has("channel") != kwargs.has("name"):
+		_fail("audio() selected device requires both 'name' and 'channel' at line %d col %d" % [name_token.line, name_token.col])
+	for pname in ["name", "id"]:
+		if not kwargs.has(pname):
+			continue
+		var value = kwargs[pname]
+		if not (value is Dictionary) or value.get("type") != "String":
+			_fail("audio() '%s' requires a quoted string at line %d col %d" % [pname, name_token.line, name_token.col])
+		elif str(value.get("value", "")).is_empty():
+			_fail("audio() '%s' must not be empty at line %d col %d" % [pname, name_token.line, name_token.col])
+	var node := {
 		"type": "Audio",
 		"band": resolved.get("band"),
 		"min": resolved.get("min"),
 		"max": resolved.get("max"),
 		"loc": {"line": name_token.line, "col": name_token.col},
 	}
+	for pname in keyword_only_params:
+		if kwargs.has(pname):
+			node[pname] = kwargs[pname]
+	return node
 
 # from(namespace, call) -> the inner call with a namespace override.
 func _transform_from(call: Dictionary, name_token):
@@ -585,30 +637,27 @@ func _parse_call():
 	var args: Array = []
 	var kwargs := {}
 	var keyword := false
+	var positional := false
+	var allow_mixed: bool = name_token.lexeme == "midi" or name_token.lexeme == "audio"
 	if _peek().type != "RPAREN":
-		if _peek().type == "IDENT" and _type_at(current + 1) == "COLON":
-			keyword = true
-			_parse_kwarg(kwargs)
-			while _peek().type == "COMMA":
-				_advance()
-				if _peek().type == "RPAREN":
-					break
-				if not (_peek().type == "IDENT" and _type_at(current + 1) == "COLON"):
+		while true:
+			if _peek().type == "IDENT" and _type_at(current + 1) == "COLON":
+				if positional and not allow_mixed:
 					var t = _peek()
 					_fail("Cannot mix positional and keyword arguments at line %d col %d" % [t.line, t.col])
-					break
+				keyword = true
 				_parse_kwarg(kwargs)
-		else:
-			args.push_back(_parse_arg())
-			while _peek().type == "COMMA":
-				_advance()
-				if _peek().type == "RPAREN":
-					break
-				if _peek().type == "IDENT" and _type_at(current + 1) == "COLON":
+			else:
+				if keyword and not allow_mixed:
 					var t = _peek()
 					_fail("Cannot mix positional and keyword arguments at line %d col %d" % [t.line, t.col])
-					break
+				positional = true
 				args.push_back(_parse_arg())
+			if _peek().type != "COMMA":
+				break
+			_advance()
+			if _peek().type == "RPAREN":
+				break
 	_expect("RPAREN", "Expect ')'")
 	var call := {"type": "Call", "name": name_token.lexeme, "args": args}
 	if keyword:

@@ -24,7 +24,10 @@ extends RefCounted
 const ALIAS_EOL_DATE := "2026-09-01"
 
 # !! Do not expand — strict allowlist for string params (reference ALLOWED_STRING_PARAMS).
-const ALLOWED_STRING_PARAMS := ["text.text", "text.font", "text.justify", "text.style"]
+const ALLOWED_STRING_PARAMS := [
+	"text.text", "text.font", "text.justify", "text.style",
+	"midi.name", "midi.id", "audio.name", "audio.id",
+]
 const STATE_SURFACES := ["time", "frame", "mouse", "resolution", "seed", "a"]
 const STATE_VALUES := ["time", "frame", "mouse", "resolution", "seed", "a", "u1", "u2", "u3", "u4", "s1", "s2", "b1", "b2", "a1", "a2", "deltaTime"]
 const SURFACE_PASSTHROUGH_CALLS := ["read"]
@@ -118,10 +121,10 @@ func _extract_identifier_name(node):
 	if t == "Func" and node.get("src"):
 		var src: String = node["src"]
 		return "{%s%s}" % [src.substr(0, 30), ("..." if src.length() > 30 else "")]
-	if node.get("name") != null:
+	if node.get("name"):
 		return node.get("name")
-	if node.get("value") != null:
-		return str(node.get("value"))
+	if node.get("value"):
+		return _js_value_string(node.get("value"))
 	return "[%s]" % [node.get("type") if node.get("type") != null else "unknown"]
 
 # ---------------------------------------------------------------- helpers
@@ -132,6 +135,13 @@ func _clamp(value, mn, mx):
 	if (mx is float or mx is int) and value > mx:
 		return mx
 	return value
+
+func _js_value_string(value) -> String:
+	if value == null:
+		return "undefined"
+	if value is float and is_finite(value) and value == floor(value):
+		return str(int(value))
+	return str(value)
 
 func _to_boolean(value) -> bool:
 	if value is float or value is int:
@@ -1043,6 +1053,8 @@ func _resolve_numeric_arg(node, def: Dictionary, dname, call: Dictionary, spec: 
 # Oscillator/Midi/Audio value resolution (faithful; the corpus produces none of these value-args).
 func _resolve_osc_value(node: Dictionary) -> Dictionary:
 	var osc_type_value = _enum_from_member_or_ident(node.get("oscType"), "oscKind")
+	if not (osc_type_value is float or osc_type_value is int):
+		osc_type_value = 0
 	var v := {
 		"type": "Oscillator",
 		"oscType": osc_type_value,
@@ -1058,7 +1070,14 @@ func _resolve_osc_value(node: Dictionary) -> Dictionary:
 	return v
 
 func _resolve_midi_value(node: Dictionary) -> Dictionary:
-	var mode_value = _enum_from_member_or_ident(node.get("mode"), "midiMode")
+	var mode_node = node.get("mode")
+	var mode_value = null
+	if mode_node is Dictionary and mode_node.get("type") == "Number":
+		var numeric_mode = mode_node.get("value")
+		if (numeric_mode is float or numeric_mode is int) and floorf(float(numeric_mode)) == float(numeric_mode) and numeric_mode >= 0 and numeric_mode <= 4:
+			mode_value = numeric_mode
+	else:
+		mode_value = _enum_from_member_or_ident(mode_node, "midiMode")
 	if not (mode_value is float or mode_value is int):
 		mode_value = 4
 	var v := {
@@ -1070,24 +1089,118 @@ func _resolve_midi_value(node: Dictionary) -> Dictionary:
 		"sensitivity": _osc_param(node.get("sensitivity"), 1),
 		"_ast": node,
 	}
+	for param_name in ["name", "id"]:
+		if not node.has(param_name):
+			continue
+		var string_value = _resolve_automation_string(node[param_name], "midi", param_name)
+		if string_value != null:
+			v[param_name] = string_value
 	if node.has("_varRef"):
 		v["_varRef"] = node["_varRef"]
 	return v
 
 func _resolve_audio_value(node: Dictionary) -> Dictionary:
-	var band_value = _enum_from_member_or_ident(node.get("band"), "audioBand")
-	if not (band_value is float or band_value is int):
-		band_value = 0
+	var band_node = node.get("band")
+	var band_value = null
+	if band_node is Dictionary and band_node.get("type") == "Number":
+		band_value = band_node.get("value")
+	else:
+		band_value = _enum_from_member_or_ident(band_node, "audioBand")
+	var valid_band: bool = (band_value is float or band_value is int) and floorf(float(band_value)) == float(band_value) and band_value >= 0 and band_value <= 4
+	if not valid_band:
+		if band_node is Dictionary and band_node.get("type") == "String":
+			_push_diag("S001", band_node, "String literal not allowed for audio() band; strings are only valid for audio.name and audio.id")
+		else:
+			_push_diag("S002", band_node, "audio() band must resolve to an integer from 0 to 4 (got %s)" % [_js_value_string(band_value)])
+	var min_value = _resolve_audio_number(node.get("min"), "min")
+	var max_value = _resolve_audio_number(node.get("max"), "max")
+	var valid_min: bool = not node.has("min") or min_value != null
+	var valid_max: bool = not node.has("max") or max_value != null
+	var channel_value = null
+	var valid_channel: bool = true
+	if node.has("channel"):
+		var channel_node = node["channel"]
+		if channel_node is Dictionary and channel_node.get("type") == "Number":
+			channel_value = channel_node.get("value")
+			valid_channel = (channel_value is float or channel_value is int) and floorf(float(channel_value)) == float(channel_value) and channel_value >= 1
+			if not valid_channel:
+				_push_diag("S002", channel_node, "audio() channel must be a positive integer (got %s)" % [_js_value_string(channel_value)])
+		else:
+			valid_channel = false
+			if channel_node is Dictionary and channel_node.get("type") == "String":
+				_push_diag("S001", channel_node, "String literal not allowed for audio() channel; strings are only valid for audio.name and audio.id")
+			else:
+				_push_diag("S002", channel_node, "audio() channel must be a positive integer")
+	var name_value = _resolve_automation_string(node.get("name"), "audio", "name") if node.has("name") else null
+	var id_value = _resolve_automation_string(node.get("id"), "audio", "id") if node.has("id") else null
+	var valid_name: bool = not node.has("name") or name_value != null
+	var valid_id: bool = not node.has("id") or id_value != null
 	var v := {
 		"type": "Audio",
-		"band": band_value,
-		"min": clampf(_osc_param(node.get("min"), 0), 0.0, 1.0),
-		"max": clampf(_osc_param(node.get("max"), 1), 0.0, 1.0),
+		"min": clampf(float(min_value if min_value != null else 0), 0.0, 1.0),
+		"max": clampf(float(max_value if max_value != null else 1), 0.0, 1.0),
+		"_invalid": not (valid_band and valid_min and valid_max and valid_channel and valid_name and valid_id),
 		"_ast": node,
 	}
+	if valid_band:
+		v["band"] = band_value
+	if node.has("channel") and valid_channel:
+		v["channel"] = channel_value
+	if name_value != null:
+		v["name"] = name_value
+	if id_value != null:
+		v["id"] = id_value
 	if node.has("_varRef"):
 		v["_varRef"] = node["_varRef"]
 	return v
+
+func _resolve_audio_number(param, param_name: String):
+	if param == null:
+		return null
+	if param is Dictionary and param.get("type") == "Number":
+		return param.get("value")
+	if param is Dictionary and param.get("type") == "String":
+		_push_diag("S001", param, "String literal not allowed for audio() %s; strings are only valid for audio.name and audio.id" % [param_name])
+	else:
+		_push_diag("S002", param, "audio() %s must be a number" % [param_name])
+	return null
+
+func _resolve_automation_string(param, kind: String, param_name: String):
+	if param == null:
+		return null
+	var allowlist_key := "%s.%s" % [kind, param_name]
+	if not ALLOWED_STRING_PARAMS.has(allowlist_key):
+		_push_diag("S001", param, "String parameter '%s' is not allowlisted" % [allowlist_key])
+		return null
+	if not (param is Dictionary) or param.get("type") != "String":
+		_push_diag("S001", param, "%s() %s requires a quoted string" % [kind, param_name])
+		return null
+	var raw: String = str(param.get("value", ""))
+	if raw.is_empty():
+		_push_diag("S001", param, "%s() %s must not be empty" % [kind, param_name])
+		return null
+	return _decode_json_string_literal_content(raw)
+
+func _decode_json_string_literal_content(raw: String) -> String:
+	var json := JSON.new()
+	if json.parse('"' + raw + '"') == OK and json.data is String:
+		return json.data
+	var decoded := ""
+	var i := 0
+	var escapes := {
+		"'": "'", '"': '"', "\\": "\\", "n": "\n", "r": "\r", "t": "\t",
+		"b": "\b", "f": "\f", "v": "\v", "0": String.chr(0),
+	}
+	while i < raw.length():
+		if raw[i] != "\\" or i + 1 >= raw.length():
+			decoded += raw[i]
+			i += 1
+			continue
+		i += 1
+		var next: String = raw[i]
+		decoded += escapes[next] if escapes.has(next) else "\\" + next
+		i += 1
+	return decoded
 
 func _enum_from_member_or_ident(type_node, enum_head: String):
 	if type_node is Dictionary and type_node.get("type") == "Member":
@@ -1102,7 +1215,7 @@ func _enum_from_member_or_ident(type_node, enum_head: String):
 			return r
 		if r is Dictionary and r.get("type") == "Number":
 			return r.get("value")
-	return 0
+	return null
 
 func _osc_param(param, fallback):
 	if param == null or not (param is Dictionary):
