@@ -7,12 +7,12 @@ How Noisemaker for Godot is verified against the JS/WebGL2 reference engine. Two
    stage by stage (the "the DSL builds the same graph" test).
 
 > The reference engine is needed here (and only here). Point the tooling at a checkout with
-> `NM_REFERENCE_ROOT=/path/to/noisemaker`; this repo assumes no sibling checkout. `GODOT` is the
+> `NM_REFERENCE_ROOT=/path/to/noisemaker`. This repo assumes no sibling checkout. `GODOT` is the
 > Godot 4.7 binary. The **addon itself needs none of this** — see `../godot/addons/noisemaker/README.md`.
 
 ## 1. Pixel parity
 
-The candidate must render **non-headless** (RenderingDevice is null under `--headless`); the harness
+The candidate must render **non-headless** (RenderingDevice is null under `--headless`). The harness
 runs Godot with an off-screen window (`--position 5000,5000`).
 
 ```bash
@@ -46,9 +46,11 @@ Pieces:
 - `../godot/addons/noisemaker/tools/render_graph.gd --graph <json>` — the Godot **candidate** PNG.
 - `compare.py` — max-abs-diff + SSIM with a per-program tolerance (`sweep.sh` holds the map).
 
-Adding a golden: write `parity/programs/<name>.dsl`, then
-`node ../tools/export-graph.mjs --file parity/programs/<name>.dsl parity/out/<name>.graph.json` and
-`SHADE_HEADLESS=1 node parity/export-and-render.mjs parity/programs/<name>.dsl parity/out --size 256 --time 0.25 --backend webgl2`.
+To add a golden:
+
+1. Write `parity/programs/<name>.dsl`.
+2. Run `node ../tools/export-graph.mjs --file parity/programs/<name>.dsl parity/out/<name>.graph.json`.
+3. Run `SHADE_HEADLESS=1 node parity/export-and-render.mjs parity/programs/<name>.dsl parity/out --size 256 --time 0.25 --backend webgl2`.
 
 ## 2. Compiler parity (in-engine DSL → graph)
 
@@ -76,7 +78,7 @@ NM_REFERENCE_ROOT=... node parity/check_definitions.mjs                         
 
 Corpus: **214 DSL programs** (`parity/programs/` 204 + `parity/corpus/` 10). All six gates pass
 214/214 (registry: ops 204/204, enums, aliases, 610 effect keys — 5/5 surfaces). The candidate dumps
-are the `_*_dump.gd` scripts under `../godot/addons/noisemaker/compiler/`; the oracles are
+are the `_*_dump.gd` scripts under `../godot/addons/noisemaker/compiler/`. The oracles are
 `../tools/dump-*.mjs`.
 
 Because the in-engine graph is byte-identical to the reference's, rendering the candidate via

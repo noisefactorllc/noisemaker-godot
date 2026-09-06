@@ -71,9 +71,12 @@ var tex := ImageTexture.create_from_image(img)
 $TextureRect.texture = tex                                # show it (or material.albedo_texture = tex, etc.)
 ```
 
-**Every DSL program** has the same shape: name the namespaces it uses (`search synth, filter`),
-chain effects, write the result to an output surface (`.write(o0)`), then pick one to show
-(`render(o0)`).
+**Every DSL program** has the same shape:
+
+- Name the namespaces it uses (`search synth, filter`).
+- Chain the effects.
+- Write the result to an output surface (`.write(o0)`).
+- Select a surface to show (`render(o0)`).
 
 Render a `.dsl` file to a PNG from the command line:
 
@@ -83,8 +86,7 @@ $GODOT --path godot --script res://addons/noisemaker/tools/render_graph.gd \
        --position 5000,5000 -- --dsl "$PWD/parity/programs/noise.dsl" --out /tmp/noise.png --size 256
 ```
 
-`render_graph.gd` resolves `--dsl` relative to `res://` (the `godot/` project dir), so pass an
-absolute path.
+`render_graph.gd` resolves `--dsl` relative to `res://` (the `godot/` project dir). Pass an absolute path.
 
 ## What works today
 
@@ -100,7 +102,8 @@ absolute path.
 - **Chaotic** particle-and-fluid programs render correctly, but as a *different instance* of the same
   chaos — they match in look and behavior, not pixel-for-pixel (tiny GPU rounding differences get
   amplified by feedback).
-- **3D effects are staged** — their definitions ship, the shaders don't yet.
+- **3D shader sources ship** with the effect definitions. Shader presence does not establish pixel parity.
+  Use the parity harness to verify the program on the target platform.
 
 Coverage table, parity numbers, and the full "chaos" explanation: **[STATUS.md](STATUS.md)** and
 **[docs/CHAOS-GATE.md](docs/CHAOS-GATE.md)**.
@@ -117,8 +120,8 @@ GDScript (so it runs in-engine) and executes the graph on Godot's `RenderingDevi
 ## Contributing
 
 The addon needs nothing external. The **dev/parity tooling**, however, compares Godot's output
-against the reference engine. The mint steps need a checkout of it via `NM_REFERENCE_ROOT`; the
-`parity/out/` goldens they produce are gitignored, so mint them first, then compare:
+against the reference engine. The steps that generate goldens need a checkout of it via `NM_REFERENCE_ROOT`.
+The resulting `parity/out/` goldens are gitignored. Generate them before you compare:
 
 ```bash
 NM_REFERENCE_ROOT=/path/to/noisemaker node tools/export-graph.mjs --file parity/programs/noise.dsl parity/out/noise.graph.json
@@ -126,8 +129,8 @@ NM_REFERENCE_ROOT=/path/to/noisemaker SHADE_HEADLESS=1 node parity/export-and-re
 GODOT=/path/to/Godot bash parity/run.sh noise   # -> [PASS] noise: max-abs-diff=1.000 ... ssim=0.99996
 ```
 
-`run.sh` itself does not read `NM_REFERENCE_ROOT` — it renders the Godot candidate and diffs it
-against the already-minted golden.
+`run.sh` itself does not read `NM_REFERENCE_ROOT`. It renders the Godot candidate and compares it
+against the existing golden.
 
 → **[parity/README.md](parity/README.md)** (test harness) · **[STATUS.md](STATUS.md)** (coverage +
 gate results) · `reference/01–10` (engine specs shared across all Noisemaker ports).

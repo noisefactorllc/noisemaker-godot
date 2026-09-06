@@ -5,7 +5,7 @@ executed on Godot's low-level `RenderingDevice` — aiming to be pixel-identical
 reference engine. The addon is **self-contained**: it compiles the DSL **and** renders it with no
 Node.js, no reference engine, and no network.
 
-> **🚧 WIP — early development.** Verified on Apple Silicon (Metal) only; treat output as
+> **🚧 WIP — early development.** Verified on Apple Silicon (Metal) only. Treat output as
 > provisional. **Read "Requirements" before integrating — the defaults will not "just work"**
 > (you need a real `RenderingDevice`, i.e. a window — see below).
 
@@ -21,13 +21,14 @@ Node.js, no reference engine, and no network.
   headless / CI rendering. For offscreen rendering, run with a window positioned off-screen
   (e.g. `--position 5000,5000`), the way the bundled `tools/render_graph.gd` does.
 - **GPU:** Vulkan-class device with `rgba16f` / `rgba32f` render targets and compute. Render targets
-  are **linear, non-sRGB**; output is quantized to 8-bit RGBA with no sRGB curve (matching the
-  reference's `round(v*255)`), top-down (a single global Y-flip is already applied at readback).
+  are **linear, non-sRGB**. Output is quantized to 8-bit RGBA with no sRGB curve (matching the
+  reference's `round(v*255)`). It is top-down (a single global Y-flip is already applied at readback).
 - **Platform:** verified on **Apple Silicon / Metal** only. Other platforms/drivers are expected to
   work (it is pipeline-agnostic) but are **not yet verified**.
 - **No external input.** The addon is output-only — there is no texture/camera/video/audio input
   (the `media`-style effects are definition-only stubs). The **3D** namespaces (`synth3d`,
-  `filter3d`) ship effect definitions but **no shaders yet**, so 3D effects render nothing.
+  `filter3d`) now ship shader sources with their effect definitions. Shader presence does not establish
+  pixel parity. Use the repo's parity harness to verify the program on the target platform.
 
 ## Installation
 
@@ -40,9 +41,11 @@ compiler + backend from your own GDScript (below). A drop-in `NMRenderer` node i
 
 ## Getting started
 
-The pieces: an `EffectRegistry` (loads the bundled effect definitions), the `Orchestrator` (compiles
-a DSL string to a normalized render graph, fully in-engine), and the `Backend` (executes the graph on
-a `RenderingDevice`).
+The pieces are:
+
+- An `EffectRegistry` loads the bundled effect definitions.
+- The `Orchestrator` compiles a DSL string to a normalized render graph, fully in-engine.
+- The `Backend` executes the graph on a `RenderingDevice`.
 
 ```gdscript
 const EffectRegistry := preload("res://addons/noisemaker/compiler/lang/effect_registry.gd")
@@ -72,7 +75,7 @@ $TextureRect.texture = render_dsl_to_texture(
     "search synth\nnoise(scaleX: 60, scaleY: 60, seed: 1).write(o0)\nrender(o0)")
 ```
 
-**Write a PNG** instead of getting a texture — render at an explicit normalized time and save:
+**Write a PNG** instead of getting a texture. Render at an explicit normalized time. Save the result:
 
 ```gdscript
 backend.setup(rd, "res://addons/noisemaker", Vector2i(512, 512))
@@ -101,7 +104,7 @@ var final_img: Image = frames[0]
 | Member | Purpose |
 |---|---|
 | `load_all() -> void` | Load the bundled effect-definition JSON (`effects/**/*.json`). Call once. |
-| `get_op(name) / get_effect(name)` | Lookup used by the compiler; you normally don't call these. |
+| `get_op(name) / get_effect(name)` | Lookup used by the compiler. You normally do not call these. |
 
 `Orchestrator` (`compiler/graph/orchestrator.gd`), constructed with an `EffectRegistry`:
 
@@ -113,18 +116,18 @@ var final_img: Image = frames[0]
 
 | Member | Purpose |
 |---|---|
-| `setup(rd: RenderingDevice, addon_dir: String, screen: Vector2i) -> void` | Initialize against a RenderingDevice; `addon_dir` is `"res://addons/noisemaker"`; `screen` is the render resolution. |
-| `render(graph: Dictionary, normalized_time := 0.25) -> void` | Render one frame at normalized time 0..1. Updates internal state; read the result via `save_surface_png`. |
-| `render_samples(graph, total_frames: int, sample_every: int) -> Array[Image]` | Step `total_frames` at 60 fps; return an `Image` at each `frame % sample_every == 0`. The general way to get pixels (single frame: `render_samples(g, 1, 1)`). |
+| `setup(rd: RenderingDevice, addon_dir: String, screen: Vector2i) -> void` | Initialize against a RenderingDevice. `addon_dir` is `"res://addons/noisemaker"`. `screen` is the render resolution. |
+| `render(graph: Dictionary, normalized_time := 0.25) -> void` | Render one frame at normalized time 0..1. Updates internal state. Read the result via `save_surface_png`. |
+| `render_samples(graph, total_frames: int, sample_every: int) -> Array[Image]` | Step `total_frames` at 60 fps. Return an `Image` at each `frame % sample_every == 0`. The general way to get pixels (single frame: `render_samples(g, 1, 1)`). |
 | `save_surface_png(path: String) -> bool` | Write the current render surface to a PNG (8-bit RGBA). |
-| `render_surface_tex: String` | The surface presented (e.g. `"global_o1"`); set by the graph's `renderSurface`. |
+| `render_surface_tex: String` | The surface presented (e.g. `"global_o1"`). The graph's `renderSurface` sets it. |
 
 The result is **8-bit RGBA, linear (no sRGB), top-down**. Convert with
 `ImageTexture.create_from_image(img)` and use it on any material / `TextureRect`.
 
 ## Performance & cost
 
-Performance is **not** optimized. Cost knobs, roughly in order:
+Performance is **not** optimized. Cost controls, roughly in order:
 
 - **Render resolution** (`setup(... Vector2i(w, h))`) dominates raymarch/fluid/feedback effects.
   Start low (256²) and scale up.
@@ -141,7 +144,7 @@ Performance is **not** optimized. Cost knobs, roughly in order:
 | `RD_NULL` / `null` from `create_local_rendering_device()` / blank | Running `--headless` (or no window) | Run with a window; for offscreen use `--position 5000,5000`. |
 | Compile errors in the Output log, nothing renders | Invalid DSL (the compiler `push_error`s and bails) | Fix the DSL; every program needs a `search` directive and a `write(oN)` / `render(oN)`. |
 | A stateful sim looks frozen / under-developed | Only one frame rendered | Use `render_samples(graph, N, …)` with enough frames (60 = 1 s). |
-| A 3D effect (`synth3d`/`filter3d`) renders nothing | 3D shaders are staged (definitions only) | Not yet supported. |
+| A 3D effect (`synth3d`/`filter3d`) renders nothing | Check the Output log for missing-shader or shader-compile errors | The 3D shader sources ship with the addon. Check that the installed addon is complete and verify the program with the parity harness. |
 | Chaotic agent flow / `target.dsl` differs from the reference | The documented chaos gate (~1-ULP `pow`) | Expected — see the repo's `docs/CHAOS-GATE.md`; it renders, just as a different chaos instance. |
 
 ## How it works

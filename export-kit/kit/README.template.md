@@ -9,8 +9,8 @@ it inside Godot with the Noisemaker addon. Nothing is pre-baked, and it fetches 
 2. Open `project.godot` in **Godot 4.7** or newer, with the **Forward+** renderer.
 3. Press **Play**.
 
-The project reads `res://program.dsl`, compiles it in-engine, renders a run of frames, and loops the
-stills it sampled along the way back in the window.
+The project reads `res://program.dsl` and compiles it in-engine. It renders a sequence of frames.
+It then plays the sampled stills in a loop in the window.
 
 ### Godot has to have a real GPU device
 
@@ -20,7 +20,7 @@ a window open. Both cases fail with `RenderingDevice unavailable`, and neither i
 change: `RenderingDevice` is a Vulkan / Metal / D3D12 abstraction.
 
 So this project needs a window and a Forward+ device. There is no headless, dedicated-server, or CI
-rendering. To render without a visible window, park it offscreen instead (see **Still images**).
+rendering. To render without a visible window, position it offscreen (see **Still images**).
 
 ## What's inside
 
@@ -45,15 +45,15 @@ copy at `addons/noisemaker/shaders/include/nm_core.glsl`.
 
 ## The engine
 
-Left **include engine code** checked? The port is here, at `addons/noisemaker/`. Press Play and it
-runs offline.
+If you kept **include engine code** checked, the port is at `addons/noisemaker/`. Press Play to run it offline.
 
-Already have the addon installed? Then you only need `program.dsl`, plus `shaders/` if you kept
+If the addon is already installed, you only need `program.dsl`, plus `shaders/` if you kept
 **include shader code** checked.
 
-Without `addons/noisemaker/` the project fails to load its preloads. Get the port from
-<https://github.com/noisefactorllc/noisemaker-for-godot>, copy its `godot/addons/noisemaker/` into
-this folder under the same name, and the project runs as described above.
+Without `addons/noisemaker/`, the project fails to load its preloads.
+Get the port from <https://github.com/noisefactorllc/noisemaker-for-godot>.
+Copy its `godot/addons/noisemaker/` into this folder under the same name.
+The project then runs as described above.
 
 Enabling the plugin under **Project Settings > Plugins** is optional here: this project preloads the
 addon's scripts by path and never asks the editor for a node. That is the port's integration surface
@@ -74,17 +74,15 @@ const SIZE := 512
 const FRAMES := 1800
 ```
 
-`SIZE` is the square render resolution. `FRAMES` is how many frames of simulation to run before the
-playback loop starts, because fluid, agent and reaction-diffusion effects begin from an empty state
-and a single frame of one is legitimately black. At 60 frames per second of simulated time, 1800
+`SIZE` is the square render resolution. `FRAMES` is the number of simulation frames to run before the playback loop starts.
+Fluid, agent and reaction-diffusion effects begin from an empty state, so a single frame of one is black. At 60 frames per second of simulated time, 1800
 frames is about 30 seconds of evolution, and it takes roughly a minute of wall clock to compute. The
 window does not repaint while that runs, which is why the scene puts a warning on screen first.
 
 `SAMPLE_EVERY` decides how many of those frames are kept as playback stills, and `PLAYBACK_FPS` how
 fast they loop once the render finishes.
 
-Programs made only of still effects do not need any of that. Drop `FRAMES` to `1` and the render is
-immediate.
+Programs made only of still effects do not need this sequence. Set `FRAMES` to `1` for an immediate render.
 
 To render a different program, replace `program.dsl`. Anything the Noisemaker language accepts
 works, as long as its effects are in the supported set below.
@@ -121,9 +119,9 @@ so it never appears over your work.
 
 ## What this port cannot render
 
-Nothing, as of this port version: every effect this port defines has a Godot shader and renders. The
-3D effects (`synth3d`, `filter3d`, and the 3D render stages) were the last gap; that closed when this
-port's remaining shaders landed.
+External texture/camera/video/audio input is not supported. Shader sources ship for the
+3D effects (`synth3d`, `filter3d`, and the 3D render stages). Shader presence does not establish
+pixel parity. Use the port's parity harness to verify the program on the target platform.
 
 No machine-readable copy of the supported set ships in this export. To check an edited `program.dsl`
 against a different build of this port, put it back into Noisedeck and open the export dialog with
@@ -131,5 +129,5 @@ Godot selected: it marks any effect this port cannot render before you export ag
 
 ## License
 
-The Noisemaker engine and the Godot port are MIT licensed; see `LICENSES/`. Your program and the
+The Noisemaker engine and the Godot port are MIT licensed. See `LICENSES/`. Your program and the
 imagery it renders are yours.
