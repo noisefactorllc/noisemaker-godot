@@ -33,7 +33,7 @@ const STATE_VALUES := ["time", "frame", "mouse", "resolution", "seed", "a", "u1"
 const SURFACE_PASSTHROUGH_CALLS := ["read"]
 const AUTOMATION_FIELDS := {
 	"Oscillator": ["oscType", "min", "max", "speed", "offset", "seed"],
-	"Midi": ["channel", "mode", "min", "max", "sensitivity", "name", "id"],
+	"Midi": ["channel", "mode", "min", "max", "sensitivity", "name", "id", "cc", "nrpn", "zone", "members"],
 	"Audio": ["band", "min", "max", "channel", "name", "id"],
 }
 const MAX_AUTOMATION_DEPTH := 8
@@ -1176,12 +1176,38 @@ func _compile_automation_descriptor(node: Dictionary, depth: int = 0):
 		return value
 
 	if node.get("type") == "Midi":
+		var mode = _resolve_automation_enum(node.get("mode"), "midiMode", 4,
+			[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "midi", "mode")
+		var has_zone := node.has("zone")
+		var zone = _resolve_automation_enum(node.get("zone"), "midiZone", null,
+			[0, 1], "midi", "zone") if has_zone else null
+		var selection_invalid := has_zone and zone == null
+		var members = null
+		var member_options := {"integer": true, "min": 1, "max": 15, "allowMember": false}
+		if node.has("members"):
+			members = _resolve_automation_number(node["members"], "midi", "members", null, member_options, depth)
+			selection_invalid = selection_invalid or not has_zone or member_options.get("invalid", false)
+		if has_zone and node.has("channel"):
+			selection_invalid = true
+		var channel_options := {"integer": true, "min": 1, "max": 16, "allowMember": false} \
+			if mode >= 5 else {"allowBoolean": true}
+		var channel = null if has_zone else _resolve_automation_number(
+			node.get("channel"), "midi", "channel", 1, channel_options, depth)
+		var cc_options := {"integer": true, "min": 0, "max": 31 if mode == 6 else 127, "allowMember": false}
+		var cc = null
+		if node.has("cc") or mode == 5 or mode == 6:
+			cc = _resolve_automation_number(node.get("cc"), "midi", "cc", 1, cc_options, depth)
+		var nrpn = null
+		var nrpn_options := {"integer": true, "min": 0, "max": 16382, "allowMember": false}
+		if node.has("nrpn") or mode == 7:
+			if not node.has("nrpn"):
+				_push_diag("S002", node, "midi() nrpn mode requires a parameter number")
+				selection_invalid = true
+			nrpn = _resolve_automation_number(node.get("nrpn"), "midi", "nrpn", null, nrpn_options, depth)
+			selection_invalid = selection_invalid or nrpn_options.get("invalid", false)
 		var value := {
 			"type": "Midi",
-			"channel": _resolve_automation_number(node.get("channel"), "midi", "channel", 1,
-				{"allowBoolean": true}, depth),
-			"mode": _resolve_automation_enum(node.get("mode"), "midiMode", 4,
-				[0, 1, 2, 3, 4], "midi", "mode"),
+			"mode": mode,
 			"min": _resolve_automation_number(node.get("min"), "midi", "min", 0,
 				{"allowBoolean": true, "allowAutomation": true, "clamp01": true}, depth),
 			"max": _resolve_automation_number(node.get("max"), "midi", "max", 1,
@@ -1190,6 +1216,11 @@ func _compile_automation_descriptor(node: Dictionary, depth: int = 0):
 				{"allowBoolean": true, "allowAutomation": true}, depth),
 			"_ast": node,
 		}
+		for entry in [["channel", channel], ["zone", zone], ["members", members], ["cc", cc], ["nrpn", nrpn]]:
+			if entry[1] != null:
+				value[entry[0]] = entry[1]
+		if selection_invalid or channel_options.get("invalid", false) or cc_options.get("invalid", false):
+			value["_invalid"] = true
 		for field in ["name", "id"]:
 			if node.has(field):
 				var string_value = _resolve_automation_string(node[field], "midi", field)
@@ -1212,7 +1243,7 @@ func _compile_automation_descriptor(node: Dictionary, depth: int = 0):
 			var channel_node = node["channel"]
 			if channel_node is Dictionary and channel_node.get("type") == "Number" \
 					and floorf(float(channel_node.get("value"))) == float(channel_node.get("value")) \
-					and channel_node.get("value") >= 1:
+					and channel_node.get("value") >= 1 and channel_node.get("value") <= 32:
 				channel = channel_node.get("value")
 			else:
 				valid_channel = false
@@ -1222,7 +1253,7 @@ func _compile_automation_descriptor(node: Dictionary, depth: int = 0):
 					var got = channel_node.get("value", channel_node.get("name", channel_node.get("type"))) \
 						if channel_node is Dictionary else null
 					_push_diag("S002", channel_node,
-						"audio() channel must be a positive integer (got %s)" % _js_value_string(got))
+						"audio() channel must be a positive integer from 1 to 32 (got %s)" % _js_value_string(got))
 		var name = _resolve_automation_string(node.get("name"), "audio", "name") if node.has("name") else null
 		var id = _resolve_automation_string(node.get("id"), "audio", "id") if node.has("id") else null
 		var value := {

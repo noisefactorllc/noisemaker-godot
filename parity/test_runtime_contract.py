@@ -416,6 +416,57 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("EXTERNAL_AUTOMATION_TEST: PASS", result.stdout, result.stdout + result.stderr)
 
+    def test_midi_expression_modes_and_default_audio_selection(self):
+        script = """
+            extends SceneTree
+
+            class MidiState extends RefCounted:
+                var channel := {"key": 60, "gate": 0, "velocity": 100,
+                    "cc": {74: 127}, "cc14": {31: 16383}, "nrpn": {1234: 8192},
+                    "pitchBend": 0, "pressure": 127, "polyPressure": {60: 64}}
+                func get_channel(_number):
+                    return channel
+                func get_zone_voice(_config):
+                    return {"channel": channel, "key": 60, "velocity": 100, "time": 0}
+
+            class AudioState extends RefCounted:
+                func get_device_channel_state(config):
+                    return {"raw": 1, "rawReady": true} if config.get("channel") == 32 else null
+
+            func _init() -> void:
+                var backend = load("res://addons/noisemaker/runtime/nm_backend.gd").new()
+                backend.set_midi_state(MidiState.new())
+                backend.set_audio_state(AudioState.new())
+                var cases := [[5, {"cc": 74}, 1.0], [6, {"cc": 31}, 1.0],
+                    [7, {"nrpn": 1234}, 8192.0 / 16383.0], [8, {}, 0.0],
+                    [9, {}, 1.0], [10, {}, 64.0 / 127.0]]
+                for item in cases:
+                    for selector in [{"channel": 2}, {"zone": 0, "members": 5}]:
+                        var value := {"type": "Midi", "mode": item[0], "min": 0.25, "max": 0.75}
+                        value.merge(item[1]); value.merge(selector)
+                        var actual = backend.resolve_uniform_value(value, 0, null)
+                        if abs(actual - (0.25 + item[2] * 0.5)) > 1e-12:
+                            print("EXPRESSION_TEST: mismatch ", value, " actual=", actual)
+                            quit(1); return
+                var audio := {"type": "Audio", "band": 4, "channel": 32, "min": 0.25, "max": 0.75}
+                if backend.resolve_uniform_value(audio, 0, null) != 0.75:
+                    quit(2); return
+                var requirements = backend.get_audio_input_requirements({"passes": [{"uniforms": {"amount": audio}}]})
+                if requirements["selected"].size() != 1 or requirements["selected"][0]["name"] != null:
+                    print("EXPRESSION_TEST: requirements ", requirements)
+                    quit(3); return
+                for selector in [{"channel": 33}, {"name": "Input"}, {"channel": 32, "id": "missing-name"}]:
+                    var invalid := {"type": "Audio", "band": 4, "min": 0.25, "max": 0.75}
+                    invalid.merge(selector)
+                    if backend.resolve_uniform_value(invalid, 0, null) != 0.25:
+                        quit(4); return
+                print("EXPRESSION_TEST: PASS")
+                quit(0)
+        """
+        result = self._run_godot_script(script)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("EXPRESSION_TEST: PASS", result.stdout)
+
     def test_blend_factor_names_accept_definition_json_casing(self):
         script = """
             extends SceneTree

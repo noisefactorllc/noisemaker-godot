@@ -133,15 +133,15 @@ func _transform_osc(call: Dictionary, name_token) -> Dictionary:
 		"loc": {"line": name_token.line, "col": name_token.col},
 	}
 
-# midi(channel, mode?, min?, max?, sensitivity?, name:?, id:?) -> Midi node.
+# midi(channel?, mode?, min?, max?, sensitivity?, name:?, id:?, cc:?, nrpn:?, zone:?, members:?)
 func _transform_midi(call: Dictionary, name_token) -> Dictionary:
 	var args: Array = call.get("args", []) if call.get("args") is Array else []
 	var kwargs: Dictionary = call.get("kwargs", {})
 	var param_order := ["channel", "mode", "min", "max", "sensitivity"]
-	var keyword_only_params := ["name", "id"]
+	var keyword_only_params := ["name", "id", "cc", "nrpn", "zone", "members"]
 	var valid_params := param_order + keyword_only_params
 	if args.size() > param_order.size():
-		_fail("midi() name and id are keyword-only at line %d col %d" % [name_token.line, name_token.col])
+		_fail("midi() name, id, cc, nrpn, zone and members are keyword-only at line %d col %d" % [name_token.line, name_token.col])
 	for key in kwargs.keys():
 		if not valid_params.has(key):
 			_fail("midi() unknown parameter '%s' at line %d col %d. Valid: %s" % [key, name_token.line, name_token.col, ", ".join(valid_params)])
@@ -164,11 +164,15 @@ func _transform_midi(call: Dictionary, name_token) -> Dictionary:
 			resolved[pname] = defaults[pname]
 	if pos_cursor < args.size():
 		_fail("midi() has an excess positional argument at line %d col %d" % [name_token.line, name_token.col])
-	if not resolved.has("channel") or resolved.get("channel") == null:
-		_fail("midi() requires 'channel' argument at line %d col %d" % [name_token.line, name_token.col])
+	if not resolved.has("channel") and not kwargs.has("zone"):
+		_fail("midi() requires 'channel' or 'zone' argument at line %d col %d" % [name_token.line, name_token.col])
+	if resolved.has("channel") and kwargs.has("zone"):
+		_fail("midi() 'channel' and 'zone' are mutually exclusive at line %d col %d" % [name_token.line, name_token.col])
+	if kwargs.has("members") and not kwargs.has("zone"):
+		_fail("midi() 'members' requires 'zone' at line %d col %d" % [name_token.line, name_token.col])
 	if kwargs.has("id") and not kwargs.has("name"):
 		_fail("midi() 'id' requires readable 'name' at line %d col %d" % [name_token.line, name_token.col])
-	for pname in keyword_only_params:
+	for pname in ["name", "id"]:
 		if not kwargs.has(pname):
 			continue
 		var value = kwargs[pname]
@@ -178,13 +182,14 @@ func _transform_midi(call: Dictionary, name_token) -> Dictionary:
 			_fail("midi() '%s' must not be empty at line %d col %d" % [pname, name_token.line, name_token.col])
 	var node := {
 		"type": "Midi",
-		"channel": resolved.get("channel"),
 		"mode": resolved.get("mode"),
 		"min": resolved.get("min"),
 		"max": resolved.get("max"),
 		"sensitivity": resolved.get("sensitivity"),
 		"loc": {"line": name_token.line, "col": name_token.col},
 	}
+	if resolved.has("channel"):
+		node["channel"] = resolved["channel"]
 	for pname in keyword_only_params:
 		if kwargs.has(pname):
 			node[pname] = kwargs[pname]
@@ -223,7 +228,7 @@ func _transform_audio(call: Dictionary, name_token) -> Dictionary:
 		_fail("audio() requires 'band' argument at line %d col %d" % [name_token.line, name_token.col])
 	if kwargs.has("id") and not kwargs.has("name"):
 		_fail("audio() 'id' requires readable 'name' at line %d col %d" % [name_token.line, name_token.col])
-	if kwargs.has("channel") != kwargs.has("name"):
+	if kwargs.has("name") and not kwargs.has("channel"):
 		_fail("audio() selected device requires both 'name' and 'channel' at line %d col %d" % [name_token.line, name_token.col])
 	for pname in ["name", "id"]:
 		if not kwargs.has(pname):

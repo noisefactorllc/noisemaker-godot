@@ -1102,42 +1102,116 @@ func _midi_channel(state, channel_number: int):
 
 func _evaluate_midi(config: Dictionary, midi_state, wall_time: float,
 		minimum: float, maximum: float, sensitivity: float) -> float:
-	if midi_state == null:
+	if config.get("_invalid", false) or midi_state == null:
 		return minimum
-	var channel = _midi_channel(midi_state, int(config.get("channel", 1)))
+	var mode: int = int(config.get("mode", 4))
+	var has_zone := config.has("zone")
+	if has_zone and (config.has("channel") or not _integer_in(config.get("zone"), 0, 1)):
+		return minimum
+	if config.has("members") and (not has_zone or not _integer_in(config["members"], 1, 15)):
+		return minimum
+	if not has_zone and mode >= 5 and not _integer_in(config.get("channel"), 1, 16):
+		return minimum
+	var voice = null
+	if has_zone:
+		if midi_state is Object:
+			for method in ["get_zone_voice", "getZoneVoice"]:
+				if midi_state.has_method(method):
+					voice = midi_state.call(method, config)
+					break
+		if voice == null:
+			return minimum
+	var channel = _state_field(voice, "channel", null) if has_zone \
+		else _midi_channel(midi_state, int(config.get("channel", 1)))
 	if channel == null:
 		return minimum
+	var note = voice if voice != null else channel
+	var note_key = _state_field(note, "key", 0)
+	if mode == 5 or mode == 6:
+		var cc = config.get("cc", 1)
+		if not _integer_in(cc, 0, 31 if mode == 6 else 127):
+			return minimum
+		var raw := _midi_index(_state_field(channel, "cc14" if mode == 6 else "cc", null), int(cc))
+		return minimum + raw / (16383.0 if mode == 6 else 127.0) * (maximum - minimum)
+	if mode == 7:
+		if not _integer_in(config.get("nrpn"), 0, 16382):
+			return minimum
+		return minimum + _midi_index(_state_field(channel, "nrpn", null), int(config["nrpn"])) \
+			/ 16383.0 * (maximum - minimum)
+	if mode == 8:
+		return minimum + float(_state_field(channel, "pitchBend", 8192)) / 16383.0 * (maximum - minimum)
+	if mode == 9:
+		return minimum + float(_state_field(channel, "pressure", 0)) / 127.0 * (maximum - minimum)
+	if mode == 10:
+		return minimum + _midi_index(_state_field(channel, "polyPressure", null), int(note_key)) \
+			/ 127.0 * (maximum - minimum)
 	var raw_value := 0.0
-	var gate := float(_state_field(channel, "gate", 0.0))
-	match int(config.get("mode", 4)):
+	var gate := 1.0 if voice != null else float(_state_field(note, "gate", 0.0))
+	match mode:
 		0:
-			raw_value = float(_state_field(channel, "key", 0.0))
+			raw_value = float(note_key)
 		1:
 			if gate == 1.0:
-				raw_value = float(_state_field(channel, "key", 0.0))
+				raw_value = float(note_key)
 		2:
 			if gate == 1.0:
-				raw_value = float(_state_field(channel, "velocity", 0.0))
+				raw_value = float(_state_field(note, "velocity", 0.0))
 		3:
 			if gate == 1.0:
-				raw_value = float(_state_field(channel, "key", 0.0))
-				var decay := min(1.0, (wall_time - float(_state_field(channel, "time", 0.0))) \
+				raw_value = float(note_key)
+				var decay := min(1.0, (wall_time - float(_state_field(note, "time", 0.0))) \
 					* sensitivity * 0.001)
 				raw_value *= 1.0 - decay
 		_:
 			if gate == 1.0:
-				raw_value = float(_state_field(channel, "velocity", 0.0))
-				var decay := min(1.0, (wall_time - float(_state_field(channel, "time", 0.0))) \
+				raw_value = float(_state_field(note, "velocity", 0.0))
+				var decay := min(1.0, (wall_time - float(_state_field(note, "time", 0.0))) \
 					* sensitivity * 0.001)
 				raw_value *= 1.0 - decay
 	return minimum + raw_value / 127.0 * (maximum - minimum)
 
+func _integer_in(value, minimum: int, maximum: int) -> bool:
+	return _finite_number(value) and floorf(float(value)) == float(value) \
+		and value >= minimum and value <= maximum
+
+func _midi_index(values, key: int) -> float:
+	if values is Dictionary:
+		return float(values.get(key, values.get(str(key), 0)))
+	if values is Array or values is PackedByteArray or values is PackedInt32Array \
+			or values is PackedFloat32Array or values is PackedFloat64Array:
+		return float(values[key]) if key >= 0 and key < values.size() else 0.0
+	return 0.0
+
+func _has_audio_selector(config: Dictionary) -> bool:
+	var source = config.get("_ast")
+	if not (source is Dictionary) or source.get("type") != "Audio":
+		source = config
+	for field in ["name", "id", "channel"]:
+		if config.has(field) or source.has(field):
+			return true
+	return false
+
+func _valid_audio_selector(config: Dictionary) -> bool:
+	var source = config.get("_ast")
+	if not (source is Dictionary) or source.get("type") != "Audio":
+		source = config
+	for field in ["name", "id", "channel"]:
+		if source.has(field) and not config.has(field):
+			return false
+	if config.has("name") and (not (config["name"] is String) or config["name"].is_empty()):
+		return false
+	if config.has("id") and (not (config["id"] is String) or config["id"].is_empty() or not config.has("name")):
+		return false
+	return _integer_in(config.get("channel"), 1, 32)
+
 func _selected_audio_state(config: Dictionary):
 	if _audio_state == null:
 		return null
-	var has_selector := config.has("name") or config.has("id") or config.has("channel")
+	var has_selector := _has_audio_selector(config)
 	if not has_selector:
 		return _audio_state
+	if not _valid_audio_selector(config):
+		return null
 	if _audio_state is Object:
 		for method in ["get_device_channel_state", "getDeviceChannelState"]:
 			if _audio_state.has_method(method):
@@ -1273,10 +1347,7 @@ func _visit_audio_requirements(value, result: Dictionary, selected_keys: Diction
 			return
 		_visit_audio_requirements(value.get("min"), result, selected_keys, depth + 1)
 		_visit_audio_requirements(value.get("max"), result, selected_keys, depth + 1)
-		if value.get("name") is String and not str(value.get("name")).is_empty() \
-				and _finite_number(value.get("channel")) \
-				and floorf(float(value.get("channel"))) == float(value.get("channel")) \
-				and value.get("channel") >= 1:
+		if has_selector_intent and _valid_audio_selector(value):
 			var requirement := {
 				"id": value.get("id") if value.get("id") is String and not str(value.get("id")).is_empty() else null,
 				"name": value.get("name"),

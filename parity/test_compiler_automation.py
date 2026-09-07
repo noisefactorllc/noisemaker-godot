@@ -92,11 +92,54 @@ class CompilerAutomationTests(unittest.TestCase):
             },
         )
 
+    def test_expression_modes_and_default_audio_channels(self):
+        expressions = {
+            **{f"mode-{mode}.dsl": f"midi(zone: selected, members: count, mode: midiMode.{mode}" +
+               (", nrpn: parameter" if mode == "nrpn" else "") + ")"
+               for mode in ("cc", "cc14", "nrpn", "pitchBend", "pressure", "polyPressure")},
+            "default-audio.dsl": "audio(band: audioBand.raw, channel: 32)",
+        }
+        programs = {name: "search synth\nlet selected = midiZone.upper\nlet count = 7\nlet parameter = 1234\n"
+                    f"noise(scaleX: {expression}).write(o0)\nrender(o0)"
+                    for name, expression in expressions.items()}
+        outputs = self._dump("_validate_dump.gd", programs)
+        for mode, number in (("cc", 5), ("cc14", 6), ("nrpn", 7), ("pitchBend", 8), ("pressure", 9), ("polyPressure", 10)):
+            output = outputs[f"mode-{mode}.dsl"]
+            self.assertTrue(output["ok"], output)
+            self.assertEqual([], output["out"]["diagnostics"])
+            value = output["out"]["plans"][0]["chain"][0]["args"]["scaleX"]
+            self.assertEqual(number, value["mode"])
+            self.assertEqual(1, value["zone"])
+            self.assertEqual(7, value["members"])
+            self.assertNotIn("channel", value)
+            if mode == "nrpn": self.assertEqual(1234, value["nrpn"])
+            if mode in ("cc", "cc14"): self.assertEqual(1, value["cc"])
+        output = outputs["default-audio.dsl"]
+        self.assertTrue(output["ok"], output)
+        self.assertEqual([], output["out"]["diagnostics"])
+        value = output["out"]["plans"][0]["chain"][0]["args"]["scaleX"]
+        self.assertEqual(32, value["channel"])
+        self.assertNotIn("name", value)
+
+    def test_invalid_expression_selectors_fail_closed(self):
+        expressions = ["midi(channel: 0, mode: 5)", "midi(channel: true, mode: 8)",
+                       "midi(channel: 2, mode: 6, cc: 32)", "midi(channel: 2, mode: 7)",
+                       "midi(channel: 2, mode: 7, nrpn: 16383)", "midi(zone: 2)",
+                       "midi(zone: 0, members: 16)", "audio(band: audioBand.raw, channel: 33)"]
+        programs = {f"invalid-{index}.dsl": f"search synth\nnoise(scaleX: {expr}).write(o0)\nrender(o0)"
+                    for index, expr in enumerate(expressions)}
+        for name, output in self._dump("_validate_dump.gd", programs).items():
+            self.assertTrue(output["ok"], name)
+            self.assertTrue(output["out"]["diagnostics"], name)
+            self.assertTrue(output["out"]["plans"][0]["chain"][0]["args"]["scaleX"]["_invalid"], name)
+
     def test_invalid_selector_forms_are_rejected(self):
         expressions = {
             "midi_id_without_name.dsl": 'midi(1, id: "midi-1")',
             "midi_unquoted_name.dsl": "midi(1, name: controller)",
-            "audio_unpaired_selector.dsl": "audio(audioBand.raw, channel: 2)",
+            "audio_unpaired_selector.dsl": 'audio(audioBand.raw, name: "Input")',
+            "midi_duplicate_selector.dsl": "midi(channel: 2, zone: 0)",
+            "midi_unpaired_members.dsl": "midi(channel: 2, members: 5)",
             "audio_selector_positional.dsl": "audio(audioBand.raw, 0, 1, 2)",
             "unknown_selector.dsl": 'midi(1, port: "Launchkey")',
         }
@@ -143,19 +186,19 @@ class CompilerAutomationTests(unittest.TestCase):
             ),
             "channel_zero.dsl": (
                 'audio(band: audioBand.raw, channel: 0, name: "Interface")',
-                "audio() channel must be a positive integer (got 0): '[Number]'",
+                "audio() channel must be a positive integer from 1 to 32 (got 0): '[Number]'",
                 "[Number]",
                 "channel",
             ),
             "channel_negative.dsl": (
                 'audio(band: audioBand.raw, channel: -1, name: "Interface")',
-                "audio() channel must be a positive integer (got -1)",
+                "audio() channel must be a positive integer from 1 to 32 (got -1)",
                 "-1",
                 "channel",
             ),
             "channel_fraction.dsl": (
                 'audio(band: audioBand.raw, channel: 1.5, name: "Interface")',
-                "audio() channel must be a positive integer (got 1.5)",
+                "audio() channel must be a positive integer from 1 to 32 (got 1.5)",
                 "1.5",
                 "channel",
             ),
